@@ -259,6 +259,8 @@ class TripLegInput(BaseModel):
     destination: str = Field(min_length=1, max_length=255)
     transport_mode: TransportMode
     distance_km: float = Field(gt=0)
+    co2_emission_kg: float = Field(ge=0)
+    co2_saved_kg: float = Field(ge=0)
     begin_time: datetime | None = None
     end_time: datetime | None = None
     travel_time_seconds: int | None = Field(default=None, ge=0)
@@ -276,6 +278,7 @@ class TripCreateRequest(BaseModel):
     destination: str | None = Field(default=None, min_length=1, max_length=255)
     transport_mode: TransportMode | None = None
     distance_km: float | None = Field(default=None, gt=0)
+    co2_emission_kg: float | None = Field(default=None, ge=0)
     co2_saved_kg: float | None = Field(default=None, ge=0)
     trip_time: datetime | None = None
 
@@ -426,10 +429,6 @@ def to_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def calculate_co2_emission_kg(mode: TransportMode, distance_km: float) -> float:
-    return round(distance_km * CO2_EMISSION_FACTORS_KG_PER_KM[mode], 3)
-
-
 def calculate_co2_saved_kg(mode: TransportMode, distance_km: float) -> float:
     car_factor = CO2_EMISSION_FACTORS_KG_PER_KM[TransportMode.car]
     mode_factor = CO2_EMISSION_FACTORS_KG_PER_KM[mode]
@@ -466,6 +465,8 @@ def build_leg_dicts(payload: TripCreateRequest) -> list[dict[str, Any]]:
                     "destination": leg.destination,
                     "transport_mode": leg.transport_mode,
                     "distance_km": float(leg.distance_km),
+                    "co2_emission_kg": float(leg.co2_emission_kg),
+                    "co2_saved_kg": float(leg.co2_saved_kg),
                     "begin_time": begin_time,
                     "end_time": end_time,
                     "travel_time_seconds": travel_time_seconds,
@@ -473,10 +474,22 @@ def build_leg_dicts(payload: TripCreateRequest) -> list[dict[str, Any]]:
             )
         return leg_dicts
 
-    if not all([payload.origin, payload.destination, payload.transport_mode, payload.distance_km]):
+    if not all(
+        [
+            payload.origin,
+            payload.destination,
+            payload.transport_mode,
+            payload.distance_km,
+            payload.co2_emission_kg is not None,
+            payload.co2_saved_kg is not None,
+        ]
+    ):
         raise HTTPException(
             status_code=422,
-            detail="Provide either 'legs' or the legacy single-leg fields origin, destination, transport_mode, and distance_km.",
+            detail=(
+                "Provide either 'legs' or the legacy single-leg fields origin, destination, "
+                "transport_mode, distance_km, co2_emission_kg, and co2_saved_kg."
+            ),
         )
 
     begin_time = to_utc(payload.trip_time or payload.begin_time) or datetime.now(timezone.utc)
@@ -500,6 +513,8 @@ def build_leg_dicts(payload: TripCreateRequest) -> list[dict[str, Any]]:
             "destination": payload.destination,
             "transport_mode": payload.transport_mode,
             "distance_km": float(payload.distance_km),
+            "co2_emission_kg": float(payload.co2_emission_kg),
+            "co2_saved_kg": float(payload.co2_saved_kg),
             "begin_time": begin_time,
             "end_time": end_time,
             "travel_time_seconds": max(travel_time_seconds, 0),
@@ -844,8 +859,6 @@ def create_trip(
     for leg_dict in leg_dicts:
         mode = leg_dict["transport_mode"]
         distance_km = leg_dict["distance_km"]
-        leg_dict["co2_emission_kg"] = calculate_co2_emission_kg(mode, distance_km)
-        leg_dict["co2_saved_kg"] = calculate_co2_saved_kg(mode, distance_km)
         leg_dict["points_awarded"] = calculate_points(mode, distance_km)
         total_distance_km += distance_km
         total_co2_emission_kg += leg_dict["co2_emission_kg"]
