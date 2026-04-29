@@ -21,6 +21,10 @@ steps:
       - --region=${_REGION}
       - --platform=managed
       - --allow-unauthenticated
+      - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,SECRET_KEY=${_JWT_SECRET}:latest
+      - --set-env-vars=ACCESS_TOKEN_EXPIRE_MINUTES=120
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
@@ -30,3 +34,7 @@ substitutions:
   _AR_REPOSITORY: sosmart
   _IMAGE_NAME: sosmart-api
   _SERVICE_NAME: sosmart-api
+  _CLOUDSQL_INSTANCE: so-smart-2025-26:europe-west1:sosmart-postgres
+  _RUNTIME_SERVICE_ACCOUNT: sosmart-api-runtime@so-smart-2025-26.iam.gserviceaccount.com
+  _DATABASE_URL_SECRET: sosmart-database-url-prod
+  _JWT_SECRET: sosmart-jwt-secret-prod
