@@ -743,24 +743,35 @@ def calculate_daily_global_stats(
 
 
 def seed_demo_data(db: Session) -> None:
-    user_count = db.execute(select(func.count(User.id))).scalar_one()
-    if user_count > 0:
-        return
+    admin = db.execute(select(User).where(User.email == DEMO_ADMIN_EMAIL)).scalar_one_or_none()
+    if admin is None:
+        admin = User(
+            email=DEMO_ADMIN_EMAIL,
+            full_name="Demo Admin",
+            password_hash=get_password_hash(DEMO_ADMIN_PASSWORD),
+            is_admin=True,
+        )
+        db.add(admin)
+        db.flush()
+    else:
+        admin.full_name = "Demo Admin"
+        admin.password_hash = get_password_hash(DEMO_ADMIN_PASSWORD)
+        admin.is_admin = True
 
-    admin = User(
-        email=DEMO_ADMIN_EMAIL,
-        full_name="Demo Admin",
-        password_hash=get_password_hash(DEMO_ADMIN_PASSWORD),
-        is_admin=True,
-    )
-    user = User(
-        email=DEMO_USER_EMAIL,
-        full_name="Demo User",
-        password_hash=get_password_hash(DEMO_USER_PASSWORD),
-        is_admin=False,
-    )
-    db.add_all([admin, user])
-    db.flush()
+    user = db.execute(select(User).where(User.email == DEMO_USER_EMAIL)).scalar_one_or_none()
+    if user is None:
+        user = User(
+            email=DEMO_USER_EMAIL,
+            full_name="Demo User",
+            password_hash=get_password_hash(DEMO_USER_PASSWORD),
+            is_admin=False,
+        )
+        db.add(user)
+        db.flush()
+    else:
+        user.full_name = "Demo User"
+        user.password_hash = get_password_hash(DEMO_USER_PASSWORD)
+        user.is_admin = False
 
     now = datetime.now(timezone.utc)
     demo_trips = [
@@ -792,7 +803,19 @@ def seed_demo_data(db: Session) -> None:
             co2_saved_kg=calculate_co2_saved_kg(TransportMode.train, 21.0),
         ),
     ]
-    db.add_all(demo_trips)
+    for demo_trip in demo_trips:
+        trip_exists = db.execute(
+            select(Trip.id).where(
+                Trip.user_id == demo_trip.user_id,
+                Trip.origin == demo_trip.origin,
+                Trip.destination == demo_trip.destination,
+                Trip.transport_mode == demo_trip.transport_mode,
+                Trip.distance_km == demo_trip.distance_km,
+            )
+        ).scalar_one_or_none()
+        if trip_exists is None:
+            db.add(demo_trip)
+
     db.commit()
 
 
