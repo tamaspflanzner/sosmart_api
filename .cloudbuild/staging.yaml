@@ -24,7 +24,7 @@ steps:
       - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,SECRET_KEY=${_JWT_SECRET}:latest
-      - --set-env-vars=ACCESS_TOKEN_EXPIRE_MINUTES=120,ENABLE_DEMO_SEED=true,DEMO_ADMIN_EMAIL=demo-admin-staging@sosmart.local,DEMO_ADMIN_PASSWORD=DemoAdmin123!,DEMO_USER_EMAIL=demo-user-staging@sosmart.local,DEMO_USER_PASSWORD=DemoUser123!
+      - --set-env-vars=ACCESS_TOKEN_EXPIRE_MINUTES=120,ENABLE_DEMO_SEED=true,DEMO_ADMIN_EMAIL=demo-admin-staging@example.com,DEMO_ADMIN_PASSWORD=DemoAdmin123!,DEMO_USER_EMAIL=demo-user-staging@example.com,DEMO_USER_PASSWORD=DemoUser123!
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:$SHORT_SHA
