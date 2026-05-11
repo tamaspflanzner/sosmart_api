@@ -353,6 +353,37 @@ class DailyGlobalStatsResponse(BaseModel):
     days: list[DailyGlobalStatsItem]
 
 
+
+
+#Leaderboard
+
+class LeaderboardEntry(BaseModel):
+    user_id: int
+    full_name: str
+    email: EmailStr
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+    walking_distance_km: float
+    bicycle_distance_km: float
+    bus_distance_km: float
+    train_distance_km: float
+    tram_distance_km: float
+    scooter_distance_km: float
+    car_distance_km: float
+    other_distance_km: float
+    eco_friendly_percentage: float
+
+
+class LeaderboardResponse(BaseModel):
+    entries: list[LeaderboardEntry]
+    total_users: int
+
+
+
+
+
+
 def get_db() -> Session:
     db = SessionLocal()
     try:
@@ -1051,3 +1082,148 @@ def get_my_stats(
     db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=current_user.id, from_date=from_date, to_date=to_date)
+
+
+
+#LeadeBoard
+
+@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+def get_leaderboard(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(
+            default="total_co2_saved_kg",
+            pattern="^(total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+        ),
+        min_co2_saved: float | None = Query(default=None, ge=0),
+        min_trips: int | None = Query(default=None, ge=0),
+        min_eco_score: float | None = Query(default=None, ge=0, le=100),
+        db: Session = Depends(get_db),
+) -> LeaderboardResponse:
+    users = db.execute(select(User)).scalars().all()
+    leaderboard_entries = []
+
+    for user in users:
+        trips = db.execute(
+            select(Trip).where(Trip.user_id == user.id)
+        ).scalars().all()
+
+        total_co2 = sum(trip.co2_saved_kg for trip in trips)
+        total_trips = len(trips)
+        total_distance = sum(trip.distance_km for trip in trips)
+
+        walking_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "walking")
+        bicycle_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bicycle")
+        bus_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bus")
+        train_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "train")
+        tram_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "tram")
+        scooter_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "scooter")
+        car_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "car")
+
+        other_distance = sum(
+            trip.distance_km
+            for trip in trips
+            if trip.transport_mode not in {
+                "walking", "bicycle", "bus", "train", "tram", "scooter", "car"
+            }
+        )
+
+        eco_friendly_modes = {"walking", "bicycle", "bus", "train", "tram", "scooter"}
+        eco_friendly_distance = sum(
+            trip.distance_km for trip in trips if trip.transport_mode in eco_friendly_modes
+        )
+
+        eco_friendly_percentage = (
+            eco_friendly_distance / total_distance * 100
+            if total_distance > 0
+            else 0
+        )
+
+        leaderboard_entries.append(
+            LeaderboardEntry(
+                user_id=user.id,
+                full_name=user.full_name,
+                email=user.email,
+                total_co2_saved_kg=round(total_co2, 3),
+                total_trips=total_trips,
+                total_distance_km=round(total_distance, 3),
+                walking_distance_km=round(walking_distance, 3),
+                bicycle_distance_km=round(bicycle_distance, 3),
+                bus_distance_km=round(bus_distance, 3),
+                train_distance_km=round(train_distance, 3),
+                tram_distance_km=round(tram_distance, 3),
+                scooter_distance_km=round(scooter_distance, 3),
+                car_distance_km=round(car_distance, 3),
+                other_distance_km=round(other_distance, 3),
+                eco_friendly_percentage=round(eco_friendly_percentage, 2),
+            )
+        )
+    if min_co2_saved is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.total_co2_saved_kg >= min_co2_saved
+        ]
+
+    if min_trips is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.total_trips >= min_trips
+        ]
+
+    if min_eco_score is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.eco_friendly_percentage >= min_eco_score
+        ]
+
+    leaderboard_entries.sort(
+        key=lambda entry: getattr(entry, sort_by),
+        reverse=True,
+    )
+
+    total_users = len(leaderboard_entries)
+
+    return LeaderboardResponse(
+        entries=leaderboard_entries[offset: offset + limit],
+        total_users=total_users,
+    )
+
+
+
+
+@app.get("/api/v1/leaderboard/rank/{user_id}")
+def get_user_rank(
+        user_id: int,
+        db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    users = db.execute(select(User)).scalars().all()
+
+    user_stats = []
+
+    for user in users:
+        total_co2 = db.execute(
+            select(func.coalesce(func.sum(Trip.co2_saved_kg), 0.0))
+            .where(Trip.user_id == user.id)
+        ).scalar_one()
+
+        user_stats.append(
+            {
+                "user_id": user.id,
+                "full_name": user.full_name,
+                "total_co2_saved_kg": float(total_co2),
+            }
+        )
+
+    user_stats.sort(key=lambda item: item["total_co2_saved_kg"], reverse=True)
+
+    for rank, user_stat in enumerate(user_stats, start=1):
+        if user_stat["user_id"] == user_id:
+            return {
+                "user_id": user_id,
+                "full_name": user_stat["full_name"],
+                "rank": rank,
+                "total_co2_saved_kg": round(user_stat["total_co2_saved_kg"], 3),
+                "total_users": len(user_stats),
+            }
+
+    raise HTTPException(status_code=404, detail="User not found.")
