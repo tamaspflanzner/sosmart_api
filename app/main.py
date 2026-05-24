@@ -115,6 +115,40 @@ class User(Base):
     shisa_messages: Mapped[list["ShisaMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    members: Mapped[list["TeamMember"]] = relationship(
+        back_populates="team",
+        cascade="all, delete-orphan",
+    )
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    team_id: Mapped[int] = mapped_column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    team: Mapped[Team] = relationship(back_populates="members")
+    user: Mapped[User] = relationship()
+
+
+
+
+
+
+
 class Trip(Base):
     __tablename__ = "trips"
 
@@ -380,7 +414,18 @@ class LeaderboardResponse(BaseModel):
     total_users: int
 
 
+class TeamLeaderboardEntry(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
 
+
+class TeamLeaderboardResponse(BaseModel):
+    entries: list[TeamLeaderboardEntry]
+    total_teams: int
 
 
 
@@ -1188,8 +1233,27 @@ def get_leaderboard(
         total_users=total_users,
     )
 
-
-
+@app.get("/api/v1/leaderboard/teams")
+def get_team_leaderboard():
+    return {
+        "entries": [
+            {
+                "id": 1,
+                "team_name": "Green Warriors",
+                "total_co2_saved_kg": 25.4,
+                "total_trips": 41,
+                "total_distance_km": 220.5,
+            },
+            {
+                "id": 2,
+                "team_name": "Eco Riders",
+                "total_co2_saved_kg": 19.8,
+                "total_trips": 35,
+                "total_distance_km": 180.2,
+            },
+        ],
+        "total_teams": 2
+    }
 
 @app.get("/api/v1/leaderboard/rank/{user_id}")
 def get_user_rank(
@@ -1227,3 +1291,54 @@ def get_user_rank(
             }
 
     raise HTTPException(status_code=404, detail="User not found.")
+
+
+@app.get("/api/v1/leaderboard/teams", response_model=TeamLeaderboardResponse)
+def get_team_leaderboard(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        db: Session = Depends(get_db),
+) -> TeamLeaderboardResponse:
+    teams = db.execute(select(Team)).scalars().all()
+    entries = []
+
+    for team in teams:
+        user_ids = [member.user_id for member in team.members]
+
+        if not user_ids:
+            total_co2 = 0.0
+            total_trips = 0
+            total_distance = 0.0
+        else:
+            trips = db.execute(
+                select(Trip).where(Trip.user_id.in_(user_ids))
+            ).scalars().all()
+
+            total_co2 = sum(trip.co2_saved_kg for trip in trips)
+            total_trips = len(trips)
+            total_distance = sum(trip.distance_km for trip in trips)
+
+        entries.append(
+            TeamLeaderboardEntry(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(user_ids),
+                total_co2_saved_kg=round(total_co2, 3),
+                total_trips=total_trips,
+                total_distance_km=round(total_distance, 3),
+            )
+        )
+
+    entries.sort(
+        key=lambda team: (
+            team.total_co2_saved_kg,
+            team.total_trips,
+            team.total_distance_km,
+        ),
+        reverse=True,
+    )
+
+    return TeamLeaderboardResponse(
+        entries=entries[offset: offset + limit],
+        total_teams=len(entries),
+    )
