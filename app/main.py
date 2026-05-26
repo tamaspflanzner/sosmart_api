@@ -428,6 +428,17 @@ class TeamLeaderboardResponse(BaseModel):
     total_teams: int
 
 
+class MyTeamStatsResponse(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    rank: int
+    total_teams: int
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+
+
 
 def get_db() -> Session:
     db = SessionLocal()
