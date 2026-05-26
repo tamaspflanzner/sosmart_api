@@ -473,17 +473,6 @@ class TeamLeaderboardResponse(BaseModel):
     total_teams: int
 
 
-class MyTeamStatsResponse(BaseModel):
-    team_id: int
-    team_name: str
-    member_count: int
-    rank: int
-    total_teams: int
-    total_co2_saved_kg: float
-    total_trips: int
-    total_distance_km: float
-
-
 def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
     teams = db.execute(select(Team)).scalars().all()
     entries = []
