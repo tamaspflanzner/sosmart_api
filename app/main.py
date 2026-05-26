@@ -1496,33 +1496,5 @@ def get_team_leaderboard(
     )
 
 
-#user's team statistics
-@app.get("/api/v1/teams/me/stats", response_model=MyTeamStatsResponse)
-def get_my_team_stats(
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-) -> MyTeamStatsResponse:
-    membership = db.execute(
-        select(TeamMember).where(TeamMember.user_id == current_user.id)
-    ).scalar_one_or_none()
 
-    if membership is None:
-        raise HTTPException(status_code=404, detail="You are not a member of any team.")
-
-    entries = build_team_leaderboard_entries(db)
-
-    for rank, entry in enumerate(entries, start=1):
-        if entry.team_id == membership.team_id:
-            return MyTeamStatsResponse(
-                team_id=entry.team_id,
-                team_name=entry.team_name,
-                member_count=entry.member_count,
-                rank=rank,
-                total_teams=len(entries),
-                total_co2_saved_kg=entry.total_co2_saved_kg,
-                total_trips=entry.total_trips,
-                total_distance_km=entry.total_distance_km,
-            )
-
-    raise HTTPException(status_code=404, detail="Team stats not found.")
 
