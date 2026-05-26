@@ -114,6 +114,9 @@ class User(Base):
     study_trips: Mapped[list["StudyTrip"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     shisa_messages: Mapped[list["ShisaMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
+    line_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+
 
 
 class Team(Base):
@@ -121,6 +124,10 @@ class Team(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    total_co2_saved_kg: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    total_trips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_distance_km: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -140,6 +147,8 @@ class TeamMember(Base):
     team_id: Mapped[int] = mapped_column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
+
+    #team and line ID
     team: Mapped[Team] = relationship(back_populates="members")
     user: Mapped[User] = relationship()
 
@@ -260,6 +269,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+#user update schema
+class UserUpdateRequest(BaseModel):
+    team_id: int | None = None
+    line_id: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -286,6 +299,11 @@ class UserResponse(BaseModel):
     full_name: str
     is_admin: bool
     created_at: datetime
+    team_id: int | None = None
+    #line_id: int | None = None
+
+
+
 
 
 class TripLegInput(BaseModel):
@@ -346,6 +364,34 @@ class TripHistoryItemResponse(BaseModel):
     legs: list[TripLegResponse]
 
 
+
+class PointHistory(Base):
+    __tablename__ = "point_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    points: Mapped[int] = mapped_column(Integer, nullable=False)
+    date_modified: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+
+class PointCreateRequest(BaseModel):
+    user_id: int
+    points: int
+    date_modified: datetime | None = None
+
+
+class UserPointsResponse(BaseModel):
+    user_id: int
+    points: int
+
+
+
+
 class ShisaChatRequest(BaseModel):
     user_id: int | None = None
     conversation_id: str = Field(min_length=1, max_length=255)
@@ -388,7 +434,6 @@ class DailyGlobalStatsResponse(BaseModel):
 
 
 
-
 #Leaderboard
 
 class LeaderboardEntry(BaseModel):
@@ -426,6 +471,52 @@ class TeamLeaderboardEntry(BaseModel):
 class TeamLeaderboardResponse(BaseModel):
     entries: list[TeamLeaderboardEntry]
     total_teams: int
+
+
+class MyTeamStatsResponse(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    rank: int
+    total_teams: int
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+
+
+def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
+    teams = db.execute(select(Team)).scalars().all()
+    entries = []
+
+    for team in teams:
+        user_ids = [member.user_id for member in team.members]
+
+        trips = []
+        if user_ids:
+            trips = db.execute(
+                select(Trip).where(Trip.user_id.in_(user_ids))
+            ).scalars().all()
+
+        entries.append(
+            TeamLeaderboardEntry(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(user_ids),
+                total_co2_saved_kg=round(sum(t.co2_saved_kg for t in trips), 3),
+                total_trips=len(trips),
+                total_distance_km=round(sum(t.distance_km for t in trips), 3),
+            )
+        )
+
+    entries.sort(
+        key=lambda team: (
+            team.total_co2_saved_kg,
+            team.total_distance_km,
+        ),
+        reverse=True,
+    )
+
+    return entries
 
 
 
@@ -908,6 +999,50 @@ def on_startup() -> None:
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
+#update-user endpoint just for admin
+@app.patch("/api/v1/users/{user_id}", response_model=UserResponse)
+def update_user(
+        user_id: int,
+        payload: UserUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+
+    # Only admin can update users
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can update users."
+        )
+
+    user = db.get(User, user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Update line_id
+    if payload.line_id is not None:
+        user.line_id = payload.line_id
+
+    # Update team_id
+    if payload.team_id is not None:
+
+        team = db.get(Team, payload.team_id)
+
+        if team is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Team not found."
+            )
+
+        user.team_id = payload.team_id
+
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
 
 @app.post("/api/v1/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
@@ -1048,6 +1183,45 @@ def get_trip_history_by_scope(
     start = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc)
     return get_trip_history_items(db, user_id, start=start)
 
+
+@app.get("/api/v1/points/{user_id}", response_model=UserPointsResponse)
+def get_user_points(
+        user_id: int,
+        db: Session = Depends(get_db),
+) -> UserPointsResponse:
+    total_points = db.execute(
+        select(func.coalesce(func.sum(PointHistory.points), 0))
+        .where(PointHistory.user_id == user_id)
+    ).scalar_one()
+
+    return UserPointsResponse(user_id=user_id, points=int(total_points))
+
+
+@app.post("/api/v1/points", response_model=UserPointsResponse)
+def add_points(
+        payload: PointCreateRequest,
+        db: Session = Depends(get_db),
+) -> UserPointsResponse:
+    user = db.get(User, payload.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    point_record = PointHistory(
+        user_id=payload.user_id,
+        points=payload.points,
+        date_modified=payload.date_modified or datetime.now(timezone.utc),
+    )
+
+    db.add(point_record)
+    db.commit()
+
+    total_points = db.execute(
+        select(func.coalesce(func.sum(PointHistory.points), 0))
+        .where(PointHistory.user_id == payload.user_id)
+    ).scalar_one()
+
+    return UserPointsResponse(user_id=payload.user_id, points=int(total_points))
 
 @app.post("/api/v1/shisa_chat", response_model=ShisaChatResponse, status_code=status.HTTP_201_CREATED)
 def create_shisa_chat_message(
@@ -1233,28 +1407,6 @@ def get_leaderboard(
         total_users=total_users,
     )
 
-@app.get("/api/v1/leaderboard/teams")
-def get_team_leaderboard():
-    return {
-        "entries": [
-            {
-                "id": 1,
-                "team_name": "Green Warriors",
-                "total_co2_saved_kg": 25.4,
-                "total_trips": 41,
-                "total_distance_km": 220.5,
-            },
-            {
-                "id": 2,
-                "team_name": "Eco Riders",
-                "total_co2_saved_kg": 19.8,
-                "total_trips": 35,
-                "total_distance_km": 180.2,
-            },
-        ],
-        "total_teams": 2
-    }
-
 @app.get("/api/v1/leaderboard/rank/{user_id}")
 def get_user_rank(
         user_id: int,
@@ -1306,9 +1458,9 @@ def get_team_leaderboard(
         user_ids = [member.user_id for member in team.members]
 
         if not user_ids:
-            total_co2 = 0.0
-            total_trips = 0
-            total_distance = 0.0
+            total_co2 = team.total_co2_saved_kg
+            total_trips = team.total_trips
+            total_distance = team.total_distance_km
         else:
             trips = db.execute(
                 select(Trip).where(Trip.user_id.in_(user_ids))
@@ -1342,3 +1494,35 @@ def get_team_leaderboard(
         entries=entries[offset: offset + limit],
         total_teams=len(entries),
     )
+
+
+#user's team statistics
+@app.get("/api/v1/teams/me/stats", response_model=MyTeamStatsResponse)
+def get_my_team_stats(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MyTeamStatsResponse:
+    membership = db.execute(
+        select(TeamMember).where(TeamMember.user_id == current_user.id)
+    ).scalar_one_or_none()
+
+    if membership is None:
+        raise HTTPException(status_code=404, detail="You are not a member of any team.")
+
+    entries = build_team_leaderboard_entries(db)
+
+    for rank, entry in enumerate(entries, start=1):
+        if entry.team_id == membership.team_id:
+            return MyTeamStatsResponse(
+                team_id=entry.team_id,
+                team_name=entry.team_name,
+                member_count=entry.member_count,
+                rank=rank,
+                total_teams=len(entries),
+                total_co2_saved_kg=entry.total_co2_saved_kg,
+                total_trips=entry.total_trips,
+                total_distance_km=entry.total_distance_km,
+            )
+
+    raise HTTPException(status_code=404, detail="Team stats not found.")
+
