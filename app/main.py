@@ -300,7 +300,7 @@ class UserResponse(BaseModel):
     is_admin: bool
     created_at: datetime
     team_id: int | None = None
-    #line_id: int | None = None
+    line_id: str | None = None
 
 
 
@@ -987,6 +987,47 @@ def seed_demo_data(db: Session) -> None:
     db.commit()
 
 
+class UserTeamLineUpdateRequest(BaseModel):
+    user_id: int
+    team_id: int | None = None
+    line_id: str | None = None
+
+
+@app.post("/api/v1/users", response_model=UserResponse)
+def post_update_user(
+        payload: UserTeamLineUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can update users."
+        )
+
+    user = db.get(User, payload.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if payload.line_id is not None:
+        user.line_id = payload.line_id
+
+    if payload.team_id is not None:
+        team = db.get(Team, payload.team_id)
+
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found.")
+
+        user.team_id = payload.team_id
+
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     if AUTO_CREATE_SCHEMA:
@@ -1147,6 +1188,14 @@ def create_trip(
         )
         db.add(legacy_trip)
 
+    if total_points > 0:
+        db.add(PointHistory(
+            user_id=current_user.id,
+            points=total_points,
+            date_modified=datetime.now(timezone.utc),
+        ))
+
+
     db.commit()
     db.refresh(study_trip)
     _ = study_trip.legs
@@ -1191,8 +1240,8 @@ def get_user_points(
         db: Session = Depends(get_db),
 ) -> UserPointsResponse:
     total_points = db.execute(
-        select(func.coalesce(func.sum(PointHistory.points), 0))
-        .where(PointHistory.user_id == user_id)
+        select(func.coalesce(func.sum(StudyTrip.total_points), 0))
+        .where(StudyTrip.user_id == user_id)
     ).scalar_one()
 
     return UserPointsResponse(user_id=user_id, points=int(total_points))
