@@ -1026,7 +1026,38 @@ def post_update_user(
 
     return user
 
+class MyUserUpdateRequest(BaseModel):
+    team_id: int | None = None
+    line_id: str | None = None
 
+@app.patch("/api/v1/users/me", response_model=UserResponse)
+def update_me(
+        payload: MyUserUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+    if payload.team_id is not None:
+        team = db.get(Team, payload.team_id)
+
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found.")
+
+        member_count = db.execute(
+            select(func.count(User.id)).where(User.team_id == payload.team_id)
+        ).scalar_one()
+
+        if member_count >= 6 and current_user.team_id != payload.team_id:
+            raise HTTPException(status_code=400, detail="This team is already full.")
+
+        current_user.team_id = payload.team_id
+
+    if payload.line_id is not None:
+        current_user.line_id = payload.line_id
+
+    db.commit()
+    db.refresh(current_user)
+
+    return current_user
 
 @app.on_event("startup")
 def on_startup() -> None:
