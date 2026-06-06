@@ -434,6 +434,21 @@ class DailyGlobalStatsResponse(BaseModel):
 
 
 
+#Team
+class TeamCreateRequest(BaseModel):
+    team_name: str = Field(min_length=2, max_length=255)
+    invited_members: list[EmailStr] = []
+
+
+class TeamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    member_count: int
+
+
+
 #Leaderboard
 
 class LeaderboardEntry(BaseModel):
@@ -466,6 +481,7 @@ class TeamLeaderboardEntry(BaseModel):
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
+    total_points: int
 
 
 class TeamLeaderboardResponse(BaseModel):
@@ -517,7 +533,7 @@ class MyTeamStatsResponse(BaseModel):
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
-
+    total_points: int
 
 
 
@@ -1536,26 +1552,33 @@ def get_team_leaderboard(
     entries = []
 
     for team in teams:
-        user_ids = [member.user_id for member in team.members]
+        users_in_team = db.execute(
+            select(User).where(User.team_id == team.id)
+        ).scalars().all()
 
-        if not user_ids:
+        user_ids = [user.id for user in users_in_team]
+
+        if user_ids:
+            study_trips = db.execute(
+                select(StudyTrip).where(StudyTrip.user_id.in_(user_ids))
+            ).scalars().all()
+
+            total_points = sum(trip.total_points for trip in study_trips)
+            total_co2 = sum(trip.total_co2_saved_kg for trip in study_trips)
+            total_trips = len(study_trips)
+            total_distance = sum(trip.total_distance_km for trip in study_trips)
+        else:
+            total_points = 0
             total_co2 = team.total_co2_saved_kg
             total_trips = team.total_trips
             total_distance = team.total_distance_km
-        else:
-            trips = db.execute(
-                select(Trip).where(Trip.user_id.in_(user_ids))
-            ).scalars().all()
-
-            total_co2 = sum(trip.co2_saved_kg for trip in trips)
-            total_trips = len(trips)
-            total_distance = sum(trip.distance_km for trip in trips)
 
         entries.append(
             TeamLeaderboardEntry(
                 team_id=team.id,
                 team_name=team.name,
-                member_count=len(user_ids),
+                member_count=len(users_in_team),
+                total_points=int(total_points),
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
@@ -1564,8 +1587,8 @@ def get_team_leaderboard(
 
     entries.sort(
         key=lambda team: (
+            team.total_points,
             team.total_co2_saved_kg,
-            team.total_trips,
             team.total_distance_km,
         ),
         reverse=True,
@@ -1612,7 +1635,40 @@ def get_my_team_stats(
                 total_co2_saved_kg=entry.total_co2_saved_kg,
                 total_trips=entry.total_trips,
                 total_distance_km=entry.total_distance_km,
+                total_points=entry.total_points,
+
             )
 
     raise HTTPException(status_code=404, detail="Team stats not found.")
 
+@app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
+def create_team(
+        payload: TeamCreateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamResponse:
+    existing_team = db.execute(
+        select(Team).where(Team.name == payload.team_name)
+    ).scalar_one_or_none()
+
+    if existing_team is not None:
+        raise HTTPException(status_code=409, detail="Team name already exists.")
+
+    if current_user.team_id is not None:
+        raise HTTPException(status_code=400, detail="You are already in a team.")
+
+    team = Team(name=payload.team_name)
+    db.add(team)
+    db.flush()
+
+    current_user.team_id = team.id
+
+    db.commit()
+    db.refresh(team)
+    db.refresh(current_user)
+
+    return TeamResponse(
+        id=team.id,
+        name=team.name,
+        member_count=1,
+    )
