@@ -192,6 +192,7 @@ class StudyTrip(Base):
     total_co2_emission_kg: Mapped[float] = mapped_column(Float, nullable=False)
     total_co2_saved_kg: Mapped[float] = mapped_column(Float, nullable=False)
     total_points: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -333,6 +334,7 @@ class TripCreateRequest(BaseModel):
     co2_emission_kg: float | None = Field(default=None, ge=0)
     co2_saved_kg: float | None = Field(default=None, ge=0)
     trip_time: datetime | None = None
+    points: int | None = Field(default=None, ge=0)
 
 
 class TripLegResponse(BaseModel):
@@ -361,6 +363,7 @@ class TripHistoryItemResponse(BaseModel):
     total_co2_emission_kg: float
     total_co2_saved_kg: float
     total_points: int
+    points: int | None = None
     legs: list[TripLegResponse]
 
 
@@ -466,6 +469,7 @@ class TeamLeaderboardEntry(BaseModel):
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
+    points: int
 
 
 class TeamLeaderboardResponse(BaseModel):
@@ -495,6 +499,7 @@ def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
                 total_co2_saved_kg=round(sum(t.co2_saved_kg for t in trips), 3),
                 total_trips=len(trips),
                 total_distance_km=round(sum(t.distance_km for t in trips), 3),
+
             )
         )
 
@@ -517,6 +522,7 @@ class MyTeamStatsResponse(BaseModel):
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
+    points: int
 
 
 
@@ -643,14 +649,14 @@ def build_leg_dicts(payload: TripCreateRequest) -> list[dict[str, Any]]:
         return leg_dicts
 
     if not all(
-        [
-            payload.origin,
-            payload.destination,
-            payload.transport_mode,
-            payload.distance_km,
-            payload.co2_emission_kg is not None,
-            payload.co2_saved_kg is not None,
-        ]
+            [
+                payload.origin,
+                payload.destination,
+                payload.transport_mode,
+                payload.distance_km,
+                payload.co2_emission_kg is not None,
+                payload.co2_saved_kg is not None,
+            ]
     ):
         raise HTTPException(
             status_code=422,
@@ -703,6 +709,7 @@ def serialize_study_trip(study_trip: StudyTrip) -> TripHistoryItemResponse:
         total_co2_emission_kg=round(study_trip.total_co2_emission_kg, 3),
         total_co2_saved_kg=round(study_trip.total_co2_saved_kg, 3),
         total_points=study_trip.total_points,
+        points=study_trip.points,
         legs=[
             TripLegResponse(
                 sequence_no=leg.sequence_no,
@@ -756,10 +763,10 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
 
 
 def query_study_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
     if start is not None:
@@ -771,10 +778,10 @@ def query_study_trips(
 
 
 def query_legacy_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[Trip]:
     stmt = select(Trip).where(Trip.user_id == user_id)
     if start is not None:
@@ -786,10 +793,10 @@ def query_legacy_trips(
 
 
 def get_trip_history_items(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[TripHistoryItemResponse]:
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
@@ -824,10 +831,10 @@ def serialize_shisa_message(message: ShisaMessage) -> ShisaChatResponse:
 
 
 def calculate_stats(
-    db: Session,
-    user_id: int | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
+        db: Session,
+        user_id: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
 ) -> StatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -875,9 +882,9 @@ def calculate_stats(
 
 
 def calculate_daily_global_stats(
-    db: Session,
-    from_date: date | None = None,
-    to_date: date | None = None,
+        db: Session,
+        from_date: date | None = None,
+        to_date: date | None = None,
 ) -> DailyGlobalStatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -979,7 +986,7 @@ def seed_demo_data(db: Session) -> None:
                 Trip.destination == demo_trip.destination,
                 Trip.transport_mode == demo_trip.transport_mode,
                 Trip.distance_km == demo_trip.distance_km,
-            )
+                )
         ).scalar_one_or_none()
         if trip_exists is None:
             db.add(demo_trip)
@@ -1152,9 +1159,9 @@ def get_me(current_user: User = Depends(get_current_user)) -> User:
 
 @app.post("/api/v1/trips", response_model=TripHistoryItemResponse, status_code=status.HTTP_201_CREATED)
 def create_trip(
-    payload: TripCreateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        payload: TripCreateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> TripHistoryItemResponse:
     leg_dicts = build_leg_dicts(payload)
 
@@ -1187,6 +1194,7 @@ def create_trip(
         total_co2_emission_kg=round(total_co2_emission_kg, 3),
         total_co2_saved_kg=round(total_co2_saved_kg, 3),
         total_points=total_points,
+        points=payload.points,
     )
     db.add(study_trip)
     db.flush()
@@ -1219,13 +1227,6 @@ def create_trip(
         )
         db.add(legacy_trip)
 
-    if total_points > 0:
-        db.add(PointHistory(
-            user_id=current_user.id,
-            points=total_points,
-            date_modified=datetime.now(timezone.utc),
-        ))
-
 
     db.commit()
     db.refresh(study_trip)
@@ -1235,9 +1236,9 @@ def create_trip(
 
 @app.get("/api/v1/trip_history/{user_id}", response_model=list[TripHistoryItemResponse])
 def get_trip_history(
-    user_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[TripHistoryItemResponse]:
     ensure_user_access(user_id, current_user)
     return get_trip_history_items(db, user_id)
@@ -1245,10 +1246,10 @@ def get_trip_history(
 
 @app.get("/api/v1/trip_history/{user_id}/{scope}")
 def get_trip_history_by_scope(
-    user_id: int,
-    scope: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        scope: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> TripHistoryItemResponse | list[TripHistoryItemResponse]:
     ensure_user_access(user_id, current_user)
 
@@ -1271,7 +1272,7 @@ def get_user_points(
         db: Session = Depends(get_db),
 ) -> UserPointsResponse:
     total_points = db.execute(
-        select(func.coalesce(func.sum(StudyTrip.total_points), 0))
+        select(func.coalesce(func.sum(StudyTrip.points), 0))
         .where(StudyTrip.user_id == user_id)
     ).scalar_one()
 
@@ -1306,9 +1307,9 @@ def add_points(
 
 @app.post("/api/v1/shisa_chat", response_model=ShisaChatResponse, status_code=status.HTTP_201_CREATED)
 def create_shisa_chat_message(
-    payload: ShisaChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        payload: ShisaChatRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> ShisaChatResponse:
     target_user_id = payload.user_id if payload.user_id is not None else current_user.id
     ensure_user_access(target_user_id, current_user)
@@ -1328,9 +1329,9 @@ def create_shisa_chat_message(
 
 @app.get("/api/v1/shisa_chat/{user_id}", response_model=list[ShisaChatResponse])
 def get_shisa_chat_messages(
-    user_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[ShisaChatResponse]:
     ensure_user_access(user_id, current_user)
     stmt = select(ShisaMessage).where(ShisaMessage.user_id == user_id).order_by(ShisaMessage.created_at.asc())
@@ -1339,10 +1340,10 @@ def get_shisa_chat_messages(
 
 @app.get("/api/v1/shisa_chat/{user_id}/{scope}", response_model=list[ShisaChatResponse])
 def get_shisa_chat_messages_by_scope(
-    user_id: int,
-    scope: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        scope: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[ShisaChatResponse]:
     ensure_user_access(user_id, current_user)
     start, end = get_history_window_from_scope(scope)
@@ -1358,28 +1359,28 @@ def get_shisa_chat_messages_by_scope(
 
 @app.get("/api/v1/stats/global", response_model=StatsResponse)
 def get_global_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=None, from_date=from_date, to_date=to_date)
 
 
 @app.get("/api/v1/stats/public/daily", response_model=DailyGlobalStatsResponse)
 def get_public_daily_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        db: Session = Depends(get_db),
 ) -> DailyGlobalStatsResponse:
     return calculate_daily_global_stats(db, from_date=from_date, to_date=to_date)
 
 
 @app.get("/api/v1/stats/me", response_model=StatsResponse)
 def get_my_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=current_user.id, from_date=from_date, to_date=to_date)
 
@@ -1526,55 +1527,6 @@ def get_user_rank(
     raise HTTPException(status_code=404, detail="User not found.")
 
 
-@app.get("/api/v1/leaderboard/teams", response_model=TeamLeaderboardResponse)
-def get_team_leaderboard(
-        limit: int = Query(default=50, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
-        db: Session = Depends(get_db),
-) -> TeamLeaderboardResponse:
-    teams = db.execute(select(Team)).scalars().all()
-    entries = []
-
-    for team in teams:
-        user_ids = [member.user_id for member in team.members]
-
-        if not user_ids:
-            total_co2 = team.total_co2_saved_kg
-            total_trips = team.total_trips
-            total_distance = team.total_distance_km
-        else:
-            trips = db.execute(
-                select(Trip).where(Trip.user_id.in_(user_ids))
-            ).scalars().all()
-
-            total_co2 = sum(trip.co2_saved_kg for trip in trips)
-            total_trips = len(trips)
-            total_distance = sum(trip.distance_km for trip in trips)
-
-        entries.append(
-            TeamLeaderboardEntry(
-                team_id=team.id,
-                team_name=team.name,
-                member_count=len(user_ids),
-                total_co2_saved_kg=round(total_co2, 3),
-                total_trips=total_trips,
-                total_distance_km=round(total_distance, 3),
-            )
-        )
-
-    entries.sort(
-        key=lambda team: (
-            team.total_co2_saved_kg,
-            team.total_trips,
-            team.total_distance_km,
-        ),
-        reverse=True,
-    )
-
-    return TeamLeaderboardResponse(
-        entries=entries[offset: offset + limit],
-        total_teams=len(entries),
-    )
 
 
 
@@ -1612,6 +1564,7 @@ def get_my_team_stats(
                 total_co2_saved_kg=entry.total_co2_saved_kg,
                 total_trips=entry.total_trips,
                 total_distance_km=entry.total_distance_km,
+
             )
 
     raise HTTPException(status_code=404, detail="Team stats not found.")
