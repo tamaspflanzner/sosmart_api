@@ -289,7 +289,7 @@ class LoginRequest(BaseModel):
 class LineLoginRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
-class LineLoginRequest(BaseModel):
+class LineAuthRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
 
@@ -1082,20 +1082,29 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     return TokenResponse(access_token=token)
 
 #login using line-id endpoint
-@app.post("/api/v1/auth/line-login", response_model=TokenResponse)
-def line_login(
-        payload: LineLoginRequest,
+@app.post("/api/v1/auth/line", response_model=TokenResponse)
+def line_auth(
+        payload: LineAuthRequest,
         db: Session = Depends(get_db),
 ) -> TokenResponse:
+
     user = db.execute(
         select(User).where(User.line_id == payload.line_id)
     ).scalar_one_or_none()
 
+    # Auto-register if user does not exist
     if user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid LINE ID."
+        user = User(
+            email=f"{payload.line_id}@line.example.com",
+            full_name=f"LINE User {payload.line_id}",
+            password_hash=get_password_hash(payload.line_id),
+            is_admin=False,
+            line_id=payload.line_id,
         )
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
     token = create_access_token({
         "sub": str(user.id),
