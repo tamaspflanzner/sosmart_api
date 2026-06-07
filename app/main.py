@@ -285,6 +285,15 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+#login using line-id
+class LineLoginRequest(BaseModel):
+    line_id: str = Field(min_length=1, max_length=255)
+
+class LineLoginRequest(BaseModel):
+    line_id: str = Field(min_length=1, max_length=255)
+
+
+
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -300,7 +309,7 @@ class UserResponse(BaseModel):
     is_admin: bool
     created_at: datetime
     team_id: int | None = None
-    #line_id: int | None = None
+    line_id: str | None = None
 
 
 
@@ -1071,6 +1080,31 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
 
     token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
+
+#login using line-id endpoint
+@app.post("/api/v1/auth/line-login", response_model=TokenResponse)
+def line_login(
+        payload: LineLoginRequest,
+        db: Session = Depends(get_db),
+) -> TokenResponse:
+    user = db.execute(
+        select(User).where(User.line_id == payload.line_id)
+    ).scalar_one_or_none()
+
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid LINE ID."
+        )
+
+    token = create_access_token({
+        "sub": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
+    })
+
+    return TokenResponse(access_token=token)
+
 
 
 @app.get("/api/v1/users/me", response_model=UserResponse)
