@@ -1074,14 +1074,21 @@ def update_me(
         if team is None:
             raise HTTPException(status_code=404, detail="Team not found.")
 
+        if current_user.team_id is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="You are already in a team. Only an admin can change your team."
+            )
+
         member_count = db.execute(
             select(func.count(User.id)).where(User.team_id == payload.team_id)
         ).scalar_one()
 
-        if member_count >= 6 and current_user.team_id != payload.team_id:
+        if member_count >= 6:
             raise HTTPException(status_code=400, detail="This team is already full.")
 
         current_user.team_id = payload.team_id
+
 
     if payload.line_id is not None:
         current_user.line_id = payload.line_id
