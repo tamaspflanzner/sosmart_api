@@ -1,5 +1,6 @@
 import os
 from datetime import date, datetime, timedelta, timezone
+import secrets
 from enum import Enum
 from typing import Any
 
@@ -294,6 +295,28 @@ class LineAuthRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
 
+# Forgot Passwor
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    reset_token: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+
+
+
 
 
 class TokenResponse(BaseModel):
@@ -388,6 +411,20 @@ class PointHistory(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
         index=True,
+    )
+#password_reset_tokens
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
 
 
@@ -1215,6 +1252,75 @@ def line_auth(
     })
 
     return TokenResponse(access_token=token)
+
+
+
+
+@app.post("/api/v1/auth/forgot-password", response_model=ForgotPasswordResponse)
+def forgot_password(
+        payload: ForgotPasswordRequest,
+        db: Session = Depends(get_db),
+) -> ForgotPasswordResponse:
+    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+
+    # Do not reveal whether email exists
+    if user is None:
+        return ForgotPasswordResponse(
+            message="If this email exists, a password reset token has been created."
+        )
+
+    raw_token = secrets.token_urlsafe(32)
+
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=get_password_hash(raw_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+
+    db.add(reset_token)
+    db.commit()
+
+    return ForgotPasswordResponse(
+        message="Password reset token created.",
+        reset_token=raw_token,
+    )
+
+#reset password
+@app.post("/api/v1/auth/reset-password", response_model=MessageResponse)
+def reset_password(
+        payload: ResetPasswordRequest,
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    now = datetime.now(timezone.utc)
+
+    tokens = db.execute(
+        select(PasswordResetToken)
+        .where(PasswordResetToken.used_at.is_(None))
+        .where(PasswordResetToken.expires_at > now)
+        .order_by(PasswordResetToken.created_at.desc())
+    ).scalars().all()
+
+    matching_token = None
+
+    for token_record in tokens:
+        if verify_password(payload.token, token_record.token_hash):
+            matching_token = token_record
+            break
+
+    if matching_token is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    user = db.get(User, matching_token.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.password_hash = get_password_hash(payload.new_password)
+    matching_token.used_at = now
+
+    db.commit()
+
+    return MessageResponse(message="Password has been reset successfully.")
 
 
 
