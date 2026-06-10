@@ -496,7 +496,8 @@ class TeamResponse(BaseModel):
     name: str
     member_count: int
 
-
+class TeamUpdateRequest(BaseModel):
+    team_name: str | None = Field(default=None, min_length=2, max_length=255)
 
 #Leaderboard
 
@@ -1794,6 +1795,51 @@ def get_my_team_stats(
             )
 
     raise HTTPException(status_code=404, detail="Team stats not found.")
+
+@app.patch("/api/v1/teams/{team_id}", response_model=TeamResponse)
+def update_team(
+        team_id: int,
+        payload: TeamUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamResponse:
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    if not current_user.is_admin and current_user.team_id != team_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update your own team."
+        )
+
+    if payload.team_name is not None:
+        existing_team = db.execute(
+            select(Team).where(
+                Team.name == payload.team_name,
+                Team.id != team_id,
+                )
+        ).scalar_one_or_none()
+
+        if existing_team is not None:
+            raise HTTPException(status_code=409, detail="Team name already exists.")
+
+        team.name = payload.team_name
+
+    db.commit()
+    db.refresh(team)
+
+    member_count = db.execute(
+        select(func.count(User.id)).where(User.team_id == team.id)
+    ).scalar_one()
+
+    return TeamResponse(
+        id=team.id,
+        name=team.name,
+        member_count=member_count,
+    )
+
 
 @app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
 def create_team(
