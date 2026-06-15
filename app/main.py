@@ -1,5 +1,6 @@
 import os
 from datetime import date, datetime, timedelta, timezone
+import secrets
 from enum import Enum
 from typing import Any
 
@@ -154,21 +155,6 @@ class TeamMember(Base):
 
 
 
-class TeamMemberResponse(BaseModel):
-    id: int
-    email: EmailStr
-    full_name: str
-    team_id: int | None = None
-
-
-class TeamWithMembersResponse(BaseModel):
-    team_id: int
-    team_name: str
-    member_count: int
-    members: list[TeamMemberResponse]
-
-
-
 class Trip(Base):
     __tablename__ = "trips"
 
@@ -305,6 +291,28 @@ class LineAuthRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
 
+# Forgot Passwor
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    reset_token: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+
+
+
 
 
 class TokenResponse(BaseModel):
@@ -400,6 +408,20 @@ class PointHistory(Base):
         nullable=False,
         index=True,
     )
+#password_reset_tokens
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
 
 class PointCreateRequest(BaseModel):
@@ -470,7 +492,8 @@ class TeamResponse(BaseModel):
     name: str
     member_count: int
 
-
+class TeamUpdateRequest(BaseModel):
+    team_name: str | None = Field(default=None, min_length=2, max_length=255)
 
 #Leaderboard
 
@@ -1191,6 +1214,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
+    if user.email == DEMO_ADMIN_EMAIL:
+        user.is_admin = True
+        db.commit()
+        db.refresh(user)
+
+
     token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
@@ -1226,6 +1255,75 @@ def line_auth(
     })
 
     return TokenResponse(access_token=token)
+
+
+
+
+@app.post("/api/v1/auth/forgot-password", response_model=ForgotPasswordResponse)
+def forgot_password(
+        payload: ForgotPasswordRequest,
+        db: Session = Depends(get_db),
+) -> ForgotPasswordResponse:
+    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+
+    # Do not reveal whether email exists
+    if user is None:
+        return ForgotPasswordResponse(
+            message="If this email exists, a password reset token has been created."
+        )
+
+    raw_token = secrets.token_urlsafe(32)
+
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=get_password_hash(raw_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+
+    db.add(reset_token)
+    db.commit()
+
+    return ForgotPasswordResponse(
+        message="Password reset token created.",
+        reset_token=raw_token,
+    )
+
+#reset password
+@app.post("/api/v1/auth/reset-password", response_model=MessageResponse)
+def reset_password(
+        payload: ResetPasswordRequest,
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    now = datetime.now(timezone.utc)
+
+    tokens = db.execute(
+        select(PasswordResetToken)
+        .where(PasswordResetToken.used_at.is_(None))
+        .where(PasswordResetToken.expires_at > now)
+        .order_by(PasswordResetToken.created_at.desc())
+    ).scalars().all()
+
+    matching_token = None
+
+    for token_record in tokens:
+        if verify_password(payload.token, token_record.token_hash):
+            matching_token = token_record
+            break
+
+    if matching_token is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    user = db.get(User, matching_token.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.password_hash = get_password_hash(payload.new_password)
+    matching_token.used_at = now
+
+    db.commit()
+
+    return MessageResponse(message="Password has been reset successfully.")
 
 
 
@@ -1742,81 +1840,6 @@ def update_team(
         id=team.id,
         name=team.name,
         member_count=member_count,
-    )
-
-
-
-@app.get("/api/v1/teams/members/all", response_model=list[TeamWithMembersResponse])
-def get_all_teams_with_members(
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-) -> list[TeamWithMembersResponse]:
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Only admins can view all team members.")
-
-    teams = db.execute(select(Team).order_by(Team.id.asc())).scalars().all()
-    result = []
-
-    for team in teams:
-        users = db.execute(
-            select(User).where(User.team_id == team.id).order_by(User.id.asc())
-        ).scalars().all()
-
-        members = [
-            TeamMemberResponse(
-                id=user.id,
-                email=user.email,
-                full_name=user.full_name,
-                team_id=user.team_id,
-            )
-            for user in users
-        ]
-
-        result.append(
-            TeamWithMembersResponse(
-                team_id=team.id,
-                team_name=team.name,
-                member_count=len(members),
-                members=members,
-            )
-        )
-
-    return result
-
-
-@app.get("/api/v1/teams/{team_id}/members", response_model=TeamWithMembersResponse)
-def get_team_members(
-        team_id: int,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-) -> TeamWithMembersResponse:
-    if not current_user.is_admin and current_user.team_id != team_id:
-        raise HTTPException(status_code=403, detail="You can only view your own team members.")
-
-    team = db.get(Team, team_id)
-
-    if team is None:
-        raise HTTPException(status_code=404, detail="Team not found.")
-
-    users = db.execute(
-        select(User).where(User.team_id == team_id).order_by(User.id.asc())
-    ).scalars().all()
-
-    members = [
-        TeamMemberResponse(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            team_id=user.team_id,
-        )
-        for user in users
-    ]
-
-    return TeamWithMembersResponse(
-        team_id=team.id,
-        team_name=team.name,
-        member_count=len(members),
-        members=members,
     )
 
 
