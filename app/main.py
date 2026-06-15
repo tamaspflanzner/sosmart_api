@@ -1148,15 +1148,15 @@ def update_user(
         user.line_id = payload.line_id
 
     # Update team_id
-    if payload.team_id is not None:
+    if "team_id" in payload.model_fields_set:
+        if payload.team_id is not None:
+            team = db.get(Team, payload.team_id)
 
-        team = db.get(Team, payload.team_id)
-
-        if team is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Team not found."
-            )
+            if team is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Team not found."
+                )
 
         user.team_id = payload.team_id
 
