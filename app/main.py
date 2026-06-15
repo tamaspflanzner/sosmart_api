@@ -1218,6 +1218,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
+    if user.email == DEMO_ADMIN_EMAIL:
+        user.is_admin = True
+        db.commit()
+        db.refresh(user)
+
+
     token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
