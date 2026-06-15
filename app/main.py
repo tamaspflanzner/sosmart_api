@@ -155,10 +155,6 @@ class TeamMember(Base):
 
 
 
-
-
-
-
 class Trip(Base):
     __tablename__ = "trips"
 
