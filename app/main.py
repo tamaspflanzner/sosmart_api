@@ -154,7 +154,18 @@ class TeamMember(Base):
 
 
 
+class TeamMemberResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    team_id: int | None = None
 
+
+class TeamWithMembersResponse(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    members: list[TeamMemberResponse]
 
 
 
@@ -1688,6 +1699,81 @@ def get_my_team_stats(
             )
 
     raise HTTPException(status_code=404, detail="Team stats not found.")
+
+
+@app.get("/api/v1/teams/members/all", response_model=list[TeamWithMembersResponse])
+def get_all_teams_with_members(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> list[TeamWithMembersResponse]:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can view all team members.")
+
+    teams = db.execute(select(Team).order_by(Team.id.asc())).scalars().all()
+    result = []
+
+    for team in teams:
+        users = db.execute(
+            select(User).where(User.team_id == team.id).order_by(User.id.asc())
+        ).scalars().all()
+
+        members = [
+            TeamMemberResponse(
+                id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                team_id=user.team_id,
+            )
+            for user in users
+        ]
+
+        result.append(
+            TeamWithMembersResponse(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(members),
+                members=members,
+            )
+        )
+
+    return result
+
+
+@app.get("/api/v1/teams/{team_id}/members", response_model=TeamWithMembersResponse)
+def get_team_members(
+        team_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamWithMembersResponse:
+    if not current_user.is_admin and current_user.team_id != team_id:
+        raise HTTPException(status_code=403, detail="You can only view your own team members.")
+
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    users = db.execute(
+        select(User).where(User.team_id == team_id).order_by(User.id.asc())
+    ).scalars().all()
+
+    members = [
+        TeamMemberResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            team_id=user.team_id,
+        )
+        for user in users
+    ]
+
+    return TeamWithMembersResponse(
+        team_id=team.id,
+        team_name=team.name,
+        member_count=len(members),
+        members=members,
+    )
+
 
 @app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
 def create_team(
