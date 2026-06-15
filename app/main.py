@@ -308,7 +308,7 @@ class LineAuthRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
 
-# Forgot Passwor
+# Forgot Password
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -328,10 +328,6 @@ class MessageResponse(BaseModel):
 
 
 
-
-
-
-
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -347,8 +343,6 @@ class UserResponse(BaseModel):
     created_at: datetime
     team_id: int | None = None
     line_id: str | None = None
-
-
 
 
 
@@ -599,8 +593,6 @@ class MyTeamStatsResponse(BaseModel):
     total_trips: int
     total_distance_km: float
     points: int
-
-
 
 
 def get_db() -> Session:
