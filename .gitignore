@@ -36,3 +36,4 @@ pip-wheel-metadata/
 .vscode/
 .DS_Store
 Thumbs.db
+local_test.db

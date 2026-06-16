@@ -1,5 +1,6 @@
 import os
 from datetime import date, datetime, timedelta, timezone
+import secrets
 from enum import Enum
 from typing import Any
 
@@ -114,6 +115,62 @@ class User(Base):
     study_trips: Mapped[list["StudyTrip"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     shisa_messages: Mapped[list["ShisaMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
+    line_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+
+
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    total_co2_saved_kg: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    total_trips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_distance_km: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    members: Mapped[list["TeamMember"]] = relationship(
+        back_populates="team",
+        cascade="all, delete-orphan",
+    )
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    team_id: Mapped[int] = mapped_column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+
+    #team and line ID
+    team: Mapped[Team] = relationship(back_populates="members")
+    user: Mapped[User] = relationship()
+
+
+
+
+class TeamMemberResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    team_id: int | None = None
+
+
+class TeamWithMembersResponse(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    members: list[TeamMemberResponse]
+
+
+
 
 class Trip(Base):
     __tablename__ = "trips"
@@ -149,6 +206,7 @@ class StudyTrip(Base):
     total_co2_emission_kg: Mapped[float] = mapped_column(Float, nullable=False)
     total_co2_saved_kg: Mapped[float] = mapped_column(Float, nullable=False)
     total_points: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -226,6 +284,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+#user update schema
+class UserUpdateRequest(BaseModel):
+    team_id: int | None = None
+    line_id: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -237,6 +299,33 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+#login using line-id
+class LineLoginRequest(BaseModel):
+    line_id: str = Field(min_length=1, max_length=255)
+
+class LineAuthRequest(BaseModel):
+    line_id: str = Field(min_length=1, max_length=255)
+
+
+
+# Forgot Password
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    reset_token: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class MessageResponse(BaseModel):
+    message: str
 
 
 class TokenResponse(BaseModel):
@@ -252,6 +341,9 @@ class UserResponse(BaseModel):
     full_name: str
     is_admin: bool
     created_at: datetime
+    team_id: int | None = None
+    line_id: str | None = None
+
 
 
 class TripLegInput(BaseModel):
@@ -281,6 +373,7 @@ class TripCreateRequest(BaseModel):
     co2_emission_kg: float | None = Field(default=None, ge=0)
     co2_saved_kg: float | None = Field(default=None, ge=0)
     trip_time: datetime | None = None
+    points: int | None = Field(default=None, ge=0)
 
 
 class TripLegResponse(BaseModel):
@@ -310,6 +403,49 @@ class TripHistoryItemResponse(BaseModel):
     total_co2_saved_kg: float
     total_points: int
     legs: list[TripLegResponse]
+    points: int | None = None
+
+
+
+class PointHistory(Base):
+    __tablename__ = "point_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    points: Mapped[int] = mapped_column(Integer, nullable=False)
+    date_modified: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+#password_reset_tokens
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class PointCreateRequest(BaseModel):
+    user_id: int
+    points: int
+    date_modified: datetime | None = None
+
+
+class UserPointsResponse(BaseModel):
+    user_id: int
+    points: int
+
+
 
 
 class ShisaChatRequest(BaseModel):
@@ -351,6 +487,112 @@ class DailyGlobalStatsItem(BaseModel):
 
 class DailyGlobalStatsResponse(BaseModel):
     days: list[DailyGlobalStatsItem]
+
+
+
+#Team
+class TeamCreateRequest(BaseModel):
+    team_name: str = Field(min_length=2, max_length=255)
+    invited_members: list[EmailStr] = []
+
+
+class TeamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    member_count: int
+
+class TeamUpdateRequest(BaseModel):
+    team_name: str | None = Field(default=None, min_length=2, max_length=255)
+
+#Leaderboard
+
+class LeaderboardEntry(BaseModel):
+    user_id: int
+    full_name: str
+    email: EmailStr
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+    walking_distance_km: float
+    bicycle_distance_km: float
+    bus_distance_km: float
+    train_distance_km: float
+    tram_distance_km: float
+    scooter_distance_km: float
+    car_distance_km: float
+    other_distance_km: float
+    eco_friendly_percentage: float
+
+
+class LeaderboardResponse(BaseModel):
+    entries: list[LeaderboardEntry]
+    total_users: int
+
+
+class TeamLeaderboardEntry(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+    points: int
+
+
+class TeamLeaderboardResponse(BaseModel):
+    entries: list[TeamLeaderboardEntry]
+    total_teams: int
+
+
+
+def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
+    teams = db.execute(select(Team)).scalars().all()
+    entries = []
+
+    for team in teams:
+        user_ids = [member.user_id for member in team.members]
+
+        trips = []
+        if user_ids:
+            trips = db.execute(
+                select(Trip).where(Trip.user_id.in_(user_ids))
+            ).scalars().all()
+
+        entries.append(
+            TeamLeaderboardEntry(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(user_ids),
+                total_co2_saved_kg=round(sum(t.co2_saved_kg for t in trips), 3),
+                total_trips=len(trips),
+                total_distance_km=round(sum(t.distance_km for t in trips), 3),
+                points=0,
+            )
+        )
+
+    entries.sort(
+        key=lambda team: (
+            team.points,
+            team.total_co2_saved_kg,
+            team.total_distance_km,
+        ),
+        reverse=True,
+    )
+
+    return entries
+
+class MyTeamStatsResponse(BaseModel):
+    team_id: int
+    team_name: str
+    member_count: int
+    rank: int
+    total_teams: int
+    total_co2_saved_kg: float
+    total_trips: int
+    total_distance_km: float
+    points: int
 
 
 def get_db() -> Session:
@@ -535,6 +777,7 @@ def serialize_study_trip(study_trip: StudyTrip) -> TripHistoryItemResponse:
         total_co2_emission_kg=round(study_trip.total_co2_emission_kg, 3),
         total_co2_saved_kg=round(study_trip.total_co2_saved_kg, 3),
         total_points=study_trip.total_points,
+        points=study_trip.points,
         legs=[
             TripLegResponse(
                 sequence_no=leg.sequence_no,
@@ -819,6 +1062,85 @@ def seed_demo_data(db: Session) -> None:
     db.commit()
 
 
+class UserTeamLineUpdateRequest(BaseModel):
+    user_id: int
+    team_id: int | None = None
+    line_id: str | None = None
+
+
+@app.post("/api/v1/users", response_model=UserResponse)
+def post_update_user(
+        payload: UserTeamLineUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can update users."
+        )
+
+    user = db.get(User, payload.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if payload.line_id is not None:
+        user.line_id = payload.line_id
+
+    if payload.team_id is not None:
+        team = db.get(Team, payload.team_id)
+
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found.")
+
+        user.team_id = payload.team_id
+
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+class MyUserUpdateRequest(BaseModel):
+    team_id: int | None = None
+    line_id: str | None = None
+
+@app.patch("/api/v1/users/me", response_model=UserResponse)
+def update_me(
+        payload: MyUserUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+    if payload.team_id is not None:
+        team = db.get(Team, payload.team_id)
+
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found.")
+
+        if current_user.team_id is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="You are already in a team. Only an admin can change your team."
+            )
+
+        member_count = db.execute(
+            select(func.count(User.id)).where(User.team_id == payload.team_id)
+        ).scalar_one()
+
+        if member_count >= 6:
+            raise HTTPException(status_code=400, detail="This team is already full.")
+
+        current_user.team_id = payload.team_id
+
+
+    if payload.line_id is not None:
+        current_user.line_id = payload.line_id
+
+    db.commit()
+    db.refresh(current_user)
+
+    return current_user
+
 @app.on_event("startup")
 def on_startup() -> None:
     if AUTO_CREATE_SCHEMA:
@@ -831,6 +1153,50 @@ def on_startup() -> None:
 @app.get("/api/v1/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+#update-user endpoint just for admin
+@app.patch("/api/v1/users/{user_id}", response_model=UserResponse)
+def update_user(
+        user_id: int,
+        payload: UserUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> User:
+
+    # Only admin can update users
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can update users."
+        )
+
+    user = db.get(User, user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Update line_id
+    if payload.line_id is not None:
+        user.line_id = payload.line_id
+
+    # Update team_id
+    if "team_id" in payload.model_fields_set:
+        if payload.team_id is not None:
+            team = db.get(Team, payload.team_id)
+
+            if team is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Team not found."
+                )
+
+        user.team_id = payload.team_id
+
+    db.commit()
+    db.refresh(user)
+
+    return user
+
 
 
 @app.post("/api/v1/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -857,8 +1223,117 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
+    if user.email == DEMO_ADMIN_EMAIL:
+        user.is_admin = True
+        db.commit()
+        db.refresh(user)
+
+
     token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
+
+#login using line-id endpoint
+@app.post("/api/v1/auth/line", response_model=TokenResponse)
+def line_auth(
+        payload: LineAuthRequest,
+        db: Session = Depends(get_db),
+) -> TokenResponse:
+
+    user = db.execute(
+        select(User).where(User.line_id == payload.line_id)
+    ).scalar_one_or_none()
+
+    # Auto-register if user does not exist
+    if user is None:
+        user = User(
+            email=f"{payload.line_id}@line.example.com",
+            full_name=f"LINE User {payload.line_id}",
+            password_hash=get_password_hash(payload.line_id),
+            is_admin=False,
+            line_id=payload.line_id,
+        )
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    token = create_access_token({
+        "sub": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
+    })
+
+    return TokenResponse(access_token=token)
+
+
+
+
+@app.post("/api/v1/auth/forgot-password", response_model=ForgotPasswordResponse)
+def forgot_password(
+        payload: ForgotPasswordRequest,
+        db: Session = Depends(get_db),
+) -> ForgotPasswordResponse:
+    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+
+    # Do not reveal whether email exists
+    if user is None:
+        return ForgotPasswordResponse(
+            message="If this email exists, a password reset token has been created."
+        )
+
+    raw_token = secrets.token_urlsafe(32)
+
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=get_password_hash(raw_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+
+    db.add(reset_token)
+    db.commit()
+
+    return ForgotPasswordResponse(
+        message="Password reset token created.",
+        reset_token=raw_token,
+    )
+
+#reset password
+@app.post("/api/v1/auth/reset-password", response_model=MessageResponse)
+def reset_password(
+        payload: ResetPasswordRequest,
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    now = datetime.now(timezone.utc)
+
+    tokens = db.execute(
+        select(PasswordResetToken)
+        .where(PasswordResetToken.used_at.is_(None))
+        .where(PasswordResetToken.expires_at > now)
+        .order_by(PasswordResetToken.created_at.desc())
+    ).scalars().all()
+
+    matching_token = None
+
+    for token_record in tokens:
+        if verify_password(payload.token, token_record.token_hash):
+            matching_token = token_record
+            break
+
+    if matching_token is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    user = db.get(User, matching_token.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.password_hash = get_password_hash(payload.new_password)
+    matching_token.used_at = now
+
+    db.commit()
+
+    return MessageResponse(message="Password has been reset successfully.")
+
 
 
 @app.get("/api/v1/users/me", response_model=UserResponse)
@@ -903,6 +1378,7 @@ def create_trip(
         total_co2_emission_kg=round(total_co2_emission_kg, 3),
         total_co2_saved_kg=round(total_co2_saved_kg, 3),
         total_points=total_points,
+        points=payload.points,
     )
     db.add(study_trip)
     db.flush()
@@ -935,6 +1411,7 @@ def create_trip(
         )
         db.add(legacy_trip)
 
+
     db.commit()
     db.refresh(study_trip)
     _ = study_trip.legs
@@ -943,9 +1420,9 @@ def create_trip(
 
 @app.get("/api/v1/trip_history/{user_id}", response_model=list[TripHistoryItemResponse])
 def get_trip_history(
-    user_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[TripHistoryItemResponse]:
     ensure_user_access(user_id, current_user)
     return get_trip_history_items(db, user_id)
@@ -953,10 +1430,10 @@ def get_trip_history(
 
 @app.get("/api/v1/trip_history/{user_id}/{scope}")
 def get_trip_history_by_scope(
-    user_id: int,
-    scope: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        scope: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> TripHistoryItemResponse | list[TripHistoryItemResponse]:
     ensure_user_access(user_id, current_user)
 
@@ -972,6 +1449,45 @@ def get_trip_history_by_scope(
     start = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc)
     return get_trip_history_items(db, user_id, start=start)
 
+
+@app.get("/api/v1/points/{user_id}", response_model=UserPointsResponse)
+def get_user_points(
+        user_id: int,
+        db: Session = Depends(get_db),
+) -> UserPointsResponse:
+    total_points = db.execute(
+        select(func.coalesce(func.sum(StudyTrip.points), 0))
+        .where(StudyTrip.user_id == user_id)
+    ).scalar_one()
+
+    return UserPointsResponse(user_id=user_id, points=int(total_points))
+
+
+@app.post("/api/v1/points", response_model=UserPointsResponse)
+def add_points(
+        payload: PointCreateRequest,
+        db: Session = Depends(get_db),
+) -> UserPointsResponse:
+    user = db.get(User, payload.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    point_record = PointHistory(
+        user_id=payload.user_id,
+        points=payload.points,
+        date_modified=payload.date_modified or datetime.now(timezone.utc),
+    )
+
+    db.add(point_record)
+    db.commit()
+
+    total_points = db.execute(
+        select(func.coalesce(func.sum(PointHistory.points), 0))
+        .where(PointHistory.user_id == payload.user_id)
+    ).scalar_one()
+
+    return UserPointsResponse(user_id=payload.user_id, points=int(total_points))
 
 @app.post("/api/v1/shisa_chat", response_model=ShisaChatResponse, status_code=status.HTTP_201_CREATED)
 def create_shisa_chat_message(
@@ -1051,3 +1567,420 @@ def get_my_stats(
     db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=current_user.id, from_date=from_date, to_date=to_date)
+
+
+
+#LeadeBoard
+
+@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+def get_leaderboard(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(
+            default="total_co2_saved_kg",
+            pattern="^(total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+        ),
+        min_co2_saved: float | None = Query(default=None, ge=0),
+        min_trips: int | None = Query(default=None, ge=0),
+        min_eco_score: float | None = Query(default=None, ge=0, le=100),
+        db: Session = Depends(get_db),
+) -> LeaderboardResponse:
+    users = db.execute(select(User)).scalars().all()
+    leaderboard_entries = []
+
+    for user in users:
+        trips = db.execute(
+            select(Trip).where(Trip.user_id == user.id)
+        ).scalars().all()
+
+        total_co2 = sum(trip.co2_saved_kg for trip in trips)
+        total_trips = len(trips)
+        total_distance = sum(trip.distance_km for trip in trips)
+
+        walking_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "walking")
+        bicycle_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bicycle")
+        bus_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bus")
+        train_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "train")
+        tram_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "tram")
+        scooter_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "scooter")
+        car_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "car")
+
+        other_distance = sum(
+            trip.distance_km
+            for trip in trips
+            if trip.transport_mode not in {
+                "walking", "bicycle", "bus", "train", "tram", "scooter", "car"
+            }
+        )
+
+        eco_friendly_modes = {"walking", "bicycle", "bus", "train", "tram", "scooter"}
+        eco_friendly_distance = sum(
+            trip.distance_km for trip in trips if trip.transport_mode in eco_friendly_modes
+        )
+
+        eco_friendly_percentage = (
+            eco_friendly_distance / total_distance * 100
+            if total_distance > 0
+            else 0
+        )
+
+        leaderboard_entries.append(
+            LeaderboardEntry(
+                user_id=user.id,
+                full_name=user.full_name,
+                email=user.email,
+                total_co2_saved_kg=round(total_co2, 3),
+                total_trips=total_trips,
+                total_distance_km=round(total_distance, 3),
+                walking_distance_km=round(walking_distance, 3),
+                bicycle_distance_km=round(bicycle_distance, 3),
+                bus_distance_km=round(bus_distance, 3),
+                train_distance_km=round(train_distance, 3),
+                tram_distance_km=round(tram_distance, 3),
+                scooter_distance_km=round(scooter_distance, 3),
+                car_distance_km=round(car_distance, 3),
+                other_distance_km=round(other_distance, 3),
+                eco_friendly_percentage=round(eco_friendly_percentage, 2),
+            )
+        )
+    if min_co2_saved is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.total_co2_saved_kg >= min_co2_saved
+        ]
+
+    if min_trips is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.total_trips >= min_trips
+        ]
+
+    if min_eco_score is not None:
+        leaderboard_entries = [
+            entry for entry in leaderboard_entries
+            if entry.eco_friendly_percentage >= min_eco_score
+        ]
+
+    leaderboard_entries.sort(
+        key=lambda entry: getattr(entry, sort_by),
+        reverse=True,
+    )
+
+    total_users = len(leaderboard_entries)
+
+    return LeaderboardResponse(
+        entries=leaderboard_entries[offset: offset + limit],
+        total_users=total_users,
+    )
+
+@app.get("/api/v1/leaderboard/rank/{user_id}")
+def get_user_rank(
+        user_id: int,
+        db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    users = db.execute(select(User)).scalars().all()
+
+    user_stats = []
+
+    for user in users:
+        total_co2 = db.execute(
+            select(func.coalesce(func.sum(Trip.co2_saved_kg), 0.0))
+            .where(Trip.user_id == user.id)
+        ).scalar_one()
+
+        user_stats.append(
+            {
+                "user_id": user.id,
+                "full_name": user.full_name,
+                "total_co2_saved_kg": float(total_co2),
+            }
+        )
+
+    user_stats.sort(key=lambda item: item["total_co2_saved_kg"], reverse=True)
+
+    for rank, user_stat in enumerate(user_stats, start=1):
+        if user_stat["user_id"] == user_id:
+            return {
+                "user_id": user_id,
+                "full_name": user_stat["full_name"],
+                "rank": rank,
+                "total_co2_saved_kg": round(user_stat["total_co2_saved_kg"], 3),
+                "total_users": len(user_stats),
+            }
+
+    raise HTTPException(status_code=404, detail="User not found.")
+
+
+@app.get("/api/v1/leaderboard/teams", response_model=TeamLeaderboardResponse)
+def get_team_leaderboard(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        db: Session = Depends(get_db),
+) -> TeamLeaderboardResponse:
+    teams = db.execute(select(Team)).scalars().all()
+    entries = []
+
+    for team in teams:
+        user_ids = db.execute(
+            select(User.id).where(User.team_id == team.id)
+        ).scalars().all()
+
+        if not user_ids:
+            total_co2 = team.total_co2_saved_kg
+            total_trips = team.total_trips
+            total_distance = team.total_distance_km
+            points = 0
+        else:
+            trips = db.execute(
+                select(StudyTrip).where(StudyTrip.user_id.in_(user_ids))
+            ).scalars().all()
+
+            total_co2 = sum(trip.total_co2_saved_kg for trip in trips)
+            total_trips = len(trips)
+            total_distance = sum(trip.total_distance_km for trip in trips)
+            points = int(sum(trip.points or 0 for trip in trips))
+
+        entries.append(
+            TeamLeaderboardEntry(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(user_ids),
+                total_co2_saved_kg=round(total_co2, 3),
+                total_trips=total_trips,
+                total_distance_km=round(total_distance, 3),
+                points=points,
+            )
+        )
+
+    entries.sort(
+        key=lambda team: (
+            team.points,
+            team.total_co2_saved_kg,
+            team.total_distance_km,
+        ),
+        reverse=True,
+    )
+
+    return TeamLeaderboardResponse(
+        entries=entries[offset: offset + limit],
+        total_teams=len(entries),
+    )
+
+
+
+
+
+
+#user's team statistics
+@app.get("/api/v1/teams/me/stats", response_model=MyTeamStatsResponse)
+def get_my_team_stats(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MyTeamStatsResponse:
+
+    if current_user.team_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail="You are not a member of any team."
+        )
+
+    team = db.get(Team, current_user.team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    entries = get_team_leaderboard(limit=200, offset=0, db=db).entries
+
+    for rank, entry in enumerate(entries, start=1):
+        if entry.team_id == current_user.team_id:
+            return MyTeamStatsResponse(
+                team_id=entry.team_id,
+                team_name=entry.team_name,
+                member_count=entry.member_count,
+                rank=rank,
+                total_teams=len(entries),
+                total_co2_saved_kg=entry.total_co2_saved_kg,
+                total_trips=entry.total_trips,
+                total_distance_km=entry.total_distance_km,
+                points=entry.points,
+            )
+
+    raise HTTPException(status_code=404, detail="Team stats not found.")
+
+
+@app.patch("/api/v1/teams/{team_id}", response_model=TeamResponse)
+def update_team(
+        team_id: int,
+        payload: TeamUpdateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamResponse:
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    if not current_user.is_admin and current_user.team_id != team_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update your own team."
+        )
+
+    if payload.team_name is not None:
+        existing_team = db.execute(
+            select(Team).where(
+                Team.name == payload.team_name,
+                Team.id != team_id,
+                )
+        ).scalar_one_or_none()
+
+        if existing_team is not None:
+            raise HTTPException(status_code=409, detail="Team name already exists.")
+
+        team.name = payload.team_name
+
+    db.commit()
+    db.refresh(team)
+
+    member_count = db.execute(
+        select(func.count(User.id)).where(User.team_id == team.id)
+    ).scalar_one()
+
+    return TeamResponse(
+        id=team.id,
+        name=team.name,
+        member_count=member_count,
+    )
+
+@app.get("/api/v1/teams/members/all", response_model=list[TeamWithMembersResponse])
+def get_all_teams_with_members(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> list[TeamWithMembersResponse]:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can view all team members.")
+
+    teams = db.execute(select(Team).order_by(Team.id.asc())).scalars().all()
+    result = []
+
+    for team in teams:
+        users = db.execute(
+            select(User).where(User.team_id == team.id).order_by(User.id.asc())
+        ).scalars().all()
+
+        members = [
+            TeamMemberResponse(
+                id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                team_id=user.team_id,
+            )
+            for user in users
+        ]
+
+        result.append(
+            TeamWithMembersResponse(
+                team_id=team.id,
+                team_name=team.name,
+                member_count=len(members),
+                members=members,
+            )
+        )
+
+    return result
+
+
+@app.get("/api/v1/teams/{team_id}/members", response_model=TeamWithMembersResponse)
+def get_team_members(
+        team_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamWithMembersResponse:
+    if not current_user.is_admin and current_user.team_id != team_id:
+        raise HTTPException(status_code=403, detail="You can only view your own team members.")
+
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    users = db.execute(
+        select(User).where(User.team_id == team_id).order_by(User.id.asc())
+    ).scalars().all()
+
+    members = [
+        TeamMemberResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            team_id=user.team_id,
+        )
+        for user in users
+    ]
+
+    return TeamWithMembersResponse(
+        team_id=team.id,
+        team_name=team.name,
+        member_count=len(members),
+        members=members,
+    )
+
+@app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
+def create_team(
+        payload: TeamCreateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TeamResponse:
+    existing_team = db.execute(
+        select(Team).where(Team.name == payload.team_name)
+    ).scalar_one_or_none()
+
+    if existing_team is not None:
+        raise HTTPException(status_code=409, detail="Team name already exists.")
+
+    if not current_user.is_admin and current_user.team_id is not None:
+        raise HTTPException(status_code=400, detail="You are already in a team.")
+
+    team = Team(name=payload.team_name)
+    db.add(team)
+    db.flush()
+
+    member_count = 0
+
+    if not current_user.is_admin:
+        current_user.team_id = team.id
+        member_count = 1
+
+    db.commit()
+    db.refresh(team)
+    db.refresh(current_user)
+
+    return TeamResponse(
+        id=team.id,
+        name=team.name,
+        member_count=member_count,
+    )
+
+@app.delete("/api/v1/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_team(
+        team_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> None:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can delete teams.")
+
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    users = db.execute(
+        select(User).where(User.team_id == team_id)
+    ).scalars().all()
+
+    for user in users:
+        user.team_id = None
+
+    db.delete(team)
+    db.commit()
