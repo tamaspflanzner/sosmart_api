@@ -308,6 +308,7 @@ class LineAuthRequest(BaseModel):
     line_id: str = Field(min_length=1, max_length=255)
 
 
+
 # Forgot Password
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
@@ -325,7 +326,6 @@ class ResetPasswordRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
-
 
 
 class TokenResponse(BaseModel):
@@ -1938,14 +1938,18 @@ def create_team(
     if existing_team is not None:
         raise HTTPException(status_code=409, detail="Team name already exists.")
 
-    if current_user.team_id is not None:
+    if not current_user.is_admin and current_user.team_id is not None:
         raise HTTPException(status_code=400, detail="You are already in a team.")
 
     team = Team(name=payload.team_name)
     db.add(team)
     db.flush()
 
-    current_user.team_id = team.id
+    member_count = 0
+
+    if not current_user.is_admin:
+        current_user.team_id = team.id
+        member_count = 1
 
     db.commit()
     db.refresh(team)
@@ -1954,5 +1958,29 @@ def create_team(
     return TeamResponse(
         id=team.id,
         name=team.name,
-        member_count=1,
+        member_count=member_count,
     )
+
+@app.delete("/api/v1/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_team(
+        team_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> None:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can delete teams.")
+
+    team = db.get(Team, team_id)
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    users = db.execute(
+        select(User).where(User.team_id == team_id)
+    ).scalars().all()
+
+    for user in users:
+        user.team_id = None
+
+    db.delete(team)
+    db.commit()
