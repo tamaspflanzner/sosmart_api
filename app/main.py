@@ -10,7 +10,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, select
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine,delete, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 
@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv(
 )
 SECRET_KEY = os.getenv("SECRET_KEY", "demo-secret-key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "525600"))
 AUTO_CREATE_SCHEMA = os.getenv("AUTO_CREATE_SCHEMA", "true").lower() == "true"
 ENABLE_DEMO_SEED = os.getenv("ENABLE_DEMO_SEED", "false").lower() == "true"
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
@@ -119,6 +119,54 @@ class User(Base):
     team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
 
 
+#Admin
+
+class ChartPoint(BaseModel):
+    label: str
+    value: int | float
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    trips_overview: list[ChartPoint]
+    top_transport_modes: list[ChartPoint]
+    recent_support_tickets: list[dict]
+    recent_audit_logs: list[dict]
+
+class AdminUserTeamResponse(BaseModel):
+    id: int
+    name: str
+
+
+class AdminUserItemResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    team: AdminUserTeamResponse | None = None
+    points: int
+    trips: int
+    is_admin: bool
+    created_at: datetime
+
+class AdminUsersSummaryResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_points: int
+
+
+
+class AdminUsersResponse(BaseModel):
+    items: list[AdminUserItemResponse]
+    total: int
+    limit: int
+    offset: int
+    summary: AdminUsersSummaryResponse
+
+
+
+
 
 class Team(Base):
     __tablename__ = "teams"
@@ -128,6 +176,9 @@ class Team(Base):
     total_co2_saved_kg: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_trips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_distance_km: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    # Points contributed by users whose accounts were deleted.
+    preserved_points: Mapped[int] = mapped_column(Integer, default=0,nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -284,6 +335,54 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+#Admin
+class ChartPoint(BaseModel):
+    label: str
+    value: int | float
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_co2_saved_kg: float
+    trips_overview: list[ChartPoint]
+    top_transport_modes: list[ChartPoint]
+    recent_support_tickets: list[dict]
+    recent_audit_logs: list[dict]
+
+
+class AdminUserTeamResponse(BaseModel):
+    id: int
+    name: str
+
+
+class AdminUserItemResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    team: AdminUserTeamResponse | None = None
+    points: int
+    trips: int
+    is_admin: bool
+    created_at: datetime
+
+
+class AdminUsersSummaryResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_points: int
+
+class AdminUsersResponse(BaseModel):
+    items: list[AdminUserItemResponse]
+    total: int
+    limit: int
+    offset: int
+    summary: AdminUsersSummaryResponse
+
+
 #user update schema
 class UserUpdateRequest(BaseModel):
     team_id: int | None = None
@@ -512,6 +611,8 @@ class LeaderboardEntry(BaseModel):
     user_id: int
     full_name: str
     email: EmailStr
+    team_name: str | None = None
+    points: int
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
@@ -651,6 +752,58 @@ def ensure_user_access(target_user_id: int, current_user: User) -> None:
     if current_user.is_admin or current_user.id == target_user_id:
         return
     raise HTTPException(status_code=403, detail="You are not allowed to access this user's data.")
+
+def delete_user_account(
+        db: Session,
+        user: User,
+) -> int:
+    preserved_points = 0
+
+    if user.team_id is not None:
+        team = db.get(Team, user.team_id)
+
+        if team is not None:
+            preserved_points = int(
+                db.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(
+                                func.coalesce(
+                                    StudyTrip.points,
+                                    StudyTrip.total_points,
+                                )
+                            ),
+                            0,
+                        )
+                    ).where(StudyTrip.user_id == user.id)
+                ).scalar_one()
+            )
+
+            team.preserved_points += preserved_points
+
+    db.execute(
+        delete(TeamMember).where(
+            TeamMember.user_id == user.id
+        )
+    )
+
+    db.execute(
+        delete(PointHistory).where(
+            PointHistory.user_id == user.id
+        )
+    )
+
+    db.execute(
+        delete(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id
+        )
+    )
+
+    db.delete(user)
+
+    return preserved_points
+
+
 
 
 def parse_date_filters(from_date: date | None, to_date: date | None) -> tuple[datetime | None, datetime | None]:
@@ -1198,7 +1351,321 @@ def update_user(
     return user
 
 
+#Admin
 
+@app.get("/api/v1/admin/overview", response_model=AdminOverviewResponse)
+def get_admin_overview(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> AdminOverviewResponse:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can view admin overview.")
+
+    now = datetime.now(timezone.utc)
+    seven_days_ago = now - timedelta(days=6)
+
+    users = db.execute(select(User)).scalars().all()
+    teams = db.execute(select(Team)).scalars().all()
+    trips = db.execute(select(Trip)).scalars().all()
+
+    total_users = len(users)
+    total_teams = len(teams)
+    total_trips = len(trips)
+
+    # Same CO2 saved logic as global statistics: legacy Trip.co2_saved_kg
+    total_co2_saved_kg = round(sum(trip.co2_saved_kg for trip in trips), 3)
+
+    trips_overview = []
+    for i in range(7):
+        day = seven_days_ago + timedelta(days=i)
+        day_start = datetime.combine(day.date(), datetime.min.time(), tzinfo=timezone.utc)
+        day_end = day_start + timedelta(days=1)
+
+        count = sum(
+            1
+            for trip in trips
+            if to_utc(trip.trip_time)
+            and day_start <= to_utc(trip.trip_time) < day_end
+        )
+
+        trips_overview.append(
+            ChartPoint(
+                label=day.date().isoformat(),
+                value=count,
+            )
+        )
+
+    mode_counts: dict[str, int] = {}
+
+    for trip in trips:
+        mode_counts[trip.transport_mode] = mode_counts.get(trip.transport_mode, 0) + 1
+
+    top_transport_modes = [
+        ChartPoint(label=mode, value=count)
+        for mode, count in sorted(
+            mode_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+
+    return AdminOverviewResponse(
+        total_users=total_users,
+        total_teams=total_teams,
+        total_trips=total_trips,
+        total_co2_saved_kg=total_co2_saved_kg,
+        trips_overview=trips_overview,
+        top_transport_modes=top_transport_modes,
+        recent_support_tickets=[],
+        recent_audit_logs=[],
+    )
+
+@app.delete(
+    "/api/v1/admin/users/{user_id}",
+    response_model=MessageResponse,
+)
+def delete_user_by_admin(
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can delete users.",
+        )
+
+    user = db.get(User, user_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    # Prevent accidental deletion of the currently authenticated admin.
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own admin account through this endpoint.",
+        )
+
+    try:
+        preserved_points = delete_user_account(
+            db=db,
+            user=user,
+        )
+
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="User deletion failed.",
+        )
+
+    return MessageResponse(
+        message=(
+            "User and associated personal/study data deleted. "
+            f"{preserved_points} points remain with the team."
+        )
+    )
+
+
+@app.get(
+    "/api/v1/admin/users",
+    response_model=AdminUsersResponse,
+)
+def get_admin_users(
+        limit: int = Query(default=10, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        registered: str = Query(default="all"),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> AdminUsersResponse:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can view users.",
+        )
+
+    # Registered date filter
+    now = datetime.now(timezone.utc)
+
+    user_filters = []
+
+    if registered == "today":
+        start_date = datetime.combine(
+            now.date(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
+        end_date = start_date + timedelta(days=1)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+        user_filters.append(
+            User.created_at < end_date
+        )
+
+    elif registered == "week":
+        start_date = now - timedelta(days=7)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered == "month":
+        start_date = now - timedelta(days=30)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered == "year":
+        start_date = datetime(
+            now.year,
+            1,
+            1,
+            tzinfo=timezone.utc,
+        )
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered != "all":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid registered filter.",
+        )
+    trip_stats = (
+        select(
+            StudyTrip.user_id.label("user_id"),
+            func.count(StudyTrip.id).label("trip_count"),
+            func.coalesce(
+                func.sum(
+                    func.coalesce(
+                        StudyTrip.points,
+                        StudyTrip.total_points,
+                    )
+                ),
+                0,
+            ).label("total_points"),
+        )
+        .group_by(StudyTrip.user_id)
+        .subquery()
+    )
+
+    total_stmt = select(
+        func.count(User.id)
+    )
+
+    if user_filters:
+        total_stmt = total_stmt.where(
+           *user_filters
+    )
+
+    total = db.execute(
+        total_stmt
+    ).scalar_one()
+
+    total_teams = db.execute(
+        select(func.count(Team.id))
+    ).scalar_one()
+
+    total_trips = db.execute(
+        select(func.count(StudyTrip.id))
+    ).scalar_one()
+
+    total_points = db.execute(
+        select(func.coalesce(
+            func.sum(
+                func.coalesce(
+                    StudyTrip.points,
+                    StudyTrip.total_points,
+                )
+            ),
+            0,
+        )
+    )
+).scalar_one()
+
+    rows = db.execute(
+        select(
+            User,
+            Team.id.label("team_id"),
+            Team.name.label("team_name"),
+            func.coalesce(
+                trip_stats.c.total_points,
+                0,
+            ).label("points"),
+            func.coalesce(
+                trip_stats.c.trip_count,
+                0,
+            ).label("trips"),
+        )
+        .outerjoin(
+            Team,
+            Team.id == User.team_id,
+            )
+        .outerjoin(
+            trip_stats,
+            trip_stats.c.user_id == User.id,
+            )
+        .order_by(
+            User.created_at.desc(),
+            User.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    items = []
+
+    for user, team_id, team_name, points, trips in rows:
+        team = None
+
+        if team_id is not None:
+            team = AdminUserTeamResponse(
+                id=team_id,
+                name=team_name,
+            )
+
+        items.append(
+            AdminUserItemResponse(
+                id=user.id,
+                full_name=user.full_name,
+                email=user.email,
+                team=team,
+                points=int(points),
+                trips=int(trips),
+                is_admin=user.is_admin,
+                created_at=user.created_at,
+            )
+        )
+
+    return AdminUsersResponse(
+        items=items,
+        total=int(total),
+        limit=limit,
+        offset=offset,
+        summary=AdminUsersSummaryResponse(
+            total_users=int(total),
+            total_teams=int(total_teams),
+            total_trips=int(total_trips),
+            total_points=int(total_points),
+        ),
+    )
 @app.post("/api/v1/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
     existing = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -1265,7 +1732,39 @@ def line_auth(
 
     return TokenResponse(access_token=token)
 
+@app.delete(
+    "/api/v1/users/me",
+    response_model=MessageResponse,
+)
+def delete_my_account(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    try:
+        preserved_points = delete_user_account(
+            db=db,
+            user=current_user,
+        )
 
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Account deletion failed.",
+        )
+
+    return MessageResponse(
+        message=(
+            "Account and associated personal/study data deleted. "
+            f"{preserved_points} points remain with the team."
+        )
+    )
 
 
 @app.post("/api/v1/auth/forgot-password", response_model=ForgotPasswordResponse)
@@ -1577,8 +2076,8 @@ def get_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
-            default="total_co2_saved_kg",
-            pattern="^(total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            default="points",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
         ),
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
@@ -1592,6 +2091,25 @@ def get_leaderboard(
         trips = db.execute(
             select(Trip).where(Trip.user_id == user.id)
         ).scalars().all()
+
+        study_trips = db.execute(
+            select(StudyTrip).where(StudyTrip.user_id == user.id)
+        ).scalars().all()
+
+        total_points = sum(
+           trip.points
+           if trip.points is not None
+           else trip.total_points
+           for trip in study_trips
+        )
+        team_name = None
+
+        if user.team_id is not None:
+             team = db.get(Team, user.team_id)
+
+        if team is not None:
+              team_name = team.name
+
 
         total_co2 = sum(trip.co2_saved_kg for trip in trips)
         total_trips = len(trips)
@@ -1629,6 +2147,8 @@ def get_leaderboard(
                 user_id=user.id,
                 full_name=user.full_name,
                 email=user.email,
+                team_name=team_name,
+                points=int(total_points),
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
@@ -1729,16 +2249,35 @@ def get_team_leaderboard(
             total_co2 = team.total_co2_saved_kg
             total_trips = team.total_trips
             total_distance = team.total_distance_km
-            points = 0
+            active_points = 0
         else:
             trips = db.execute(
-                select(StudyTrip).where(StudyTrip.user_id.in_(user_ids))
+                select(StudyTrip).where(
+                    StudyTrip.user_id.in_(user_ids)
+                )
             ).scalars().all()
 
-            total_co2 = sum(trip.total_co2_saved_kg for trip in trips)
+            total_co2 = sum(
+                trip.total_co2_saved_kg
+                for trip in trips
+            )
             total_trips = len(trips)
-            total_distance = sum(trip.total_distance_km for trip in trips)
-            points = int(sum(trip.points or 0 for trip in trips))
+            total_distance = sum(
+                trip.total_distance_km
+                for trip in trips
+            )
+
+            active_points = sum(
+                trip.points
+                if trip.points is not None
+                else trip.total_points
+                for trip in trips
+            )
+
+        team_points = (
+                team.preserved_points
+                + int(active_points)
+        )
 
         entries.append(
             TeamLeaderboardEntry(
@@ -1748,7 +2287,7 @@ def get_team_leaderboard(
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
-                points=points,
+                points=team_points,
             )
         )
 
@@ -1984,3 +2523,108 @@ def delete_team(
 
     db.delete(team)
     db.commit()
+
+
+#Admin
+@app.get(
+    "/api/v1/admin/overview",
+    response_model=AdminOverviewResponse,
+)
+def get_admin_overview(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> AdminOverviewResponse:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can view admin overview.",
+        )
+
+    now = datetime.now(timezone.utc)
+    seven_days_ago = now - timedelta(days=6)
+
+    users = db.execute(
+        select(User)
+    ).scalars().all()
+
+    teams = db.execute(
+        select(Team)
+    ).scalars().all()
+
+    trips = db.execute(
+        select(Trip)
+    ).scalars().all()
+
+    total_users = len(users)
+    total_teams = len(teams)
+    total_trips = len(trips)
+
+    total_co2_saved_kg = round(
+        sum(
+            float(trip.co2_saved_kg or 0)
+            for trip in trips
+        ),
+        3,
+    )
+
+    trips_overview = []
+
+    for i in range(7):
+        day = seven_days_ago + timedelta(days=i)
+
+        day_start = datetime.combine(
+            day.date(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
+        day_end = day_start + timedelta(days=1)
+
+        count = sum(
+            1
+            for trip in trips
+            if to_utc(trip.trip_time)
+            and day_start
+            <= to_utc(trip.trip_time)
+            < day_end
+        )
+
+        trips_overview.append(
+            ChartPoint(
+                label=day.date().isoformat(),
+                value=count,
+            )
+        )
+
+    mode_counts: dict[str, int] = {}
+
+    for trip in trips:
+        mode = trip.transport_mode or "other"
+
+        mode_counts[mode] = (
+                mode_counts.get(mode, 0) + 1
+        )
+
+    top_transport_modes = [
+        ChartPoint(
+            label=mode,
+            value=count,
+        )
+        for mode, count in sorted(
+            mode_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+
+    return AdminOverviewResponse(
+        total_users=total_users,
+        total_teams=total_teams,
+        total_trips=total_trips,
+        total_co2_saved_kg=total_co2_saved_kg,
+        trips_overview=trips_overview,
+        top_transport_modes=top_transport_modes,
+        recent_support_tickets=[],
+        recent_audit_logs=[],
+    )
