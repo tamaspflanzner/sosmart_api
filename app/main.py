@@ -2076,8 +2076,8 @@ def get_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
-            default="total_co2_saved_kg",
-            pattern="^(total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            default="points",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
         ),
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
@@ -2102,13 +2102,9 @@ def get_leaderboard(
            else trip.total_points
            for trip in study_trips
         )
-        team_name = None
 
-        if user.team_id is not None:
-             team = db.get(Team, user.team_id)
-
-        if team is not None:
-              team_name = team.name
+        team = db.get(Team, user.team_id) if user.team_id is not None else None
+        team_name = team.name if team is not None else None
 
 
         total_co2 = sum(trip.co2_saved_kg for trip in trips)
@@ -2287,7 +2283,7 @@ def get_team_leaderboard(
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
-                points=points,
+                points=team_points,
             )
         )
 
