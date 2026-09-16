@@ -115,8 +115,20 @@ class User(Base):
     study_trips: Mapped[list["StudyTrip"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     shisa_messages: Mapped[list["ShisaMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
-    line_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+    
+
+    line_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    team_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("teams.id"),
+        nullable=True,
+        index=True
+    )
 
 
 #Admin
@@ -1238,8 +1250,34 @@ def post_update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
+
     if payload.line_id is not None:
-        user.line_id = payload.line_id
+        new_line_id = payload.line_id.strip()
+
+    if not new_line_id:
+        raise HTTPException(
+            status_code=400,
+            detail="LINE ID cannot be empty."
+        )
+
+    existing_user = db.execute(
+        select(User).where(
+            User.line_id == new_line_id,
+            User.id != current_user.id
+        )
+    ).scalar_one_or_none()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail="This LINE ID is already linked to another account."
+        )
+
+    current_user.line_id = new_line_id
+
+
+
+
 
     if payload.team_id is not None:
         team = db.get(Team, payload.team_id)
@@ -1287,7 +1325,28 @@ def update_me(
 
 
     if payload.line_id is not None:
-        current_user.line_id = payload.line_id
+        new_line_id = payload.line_id.strip()
+
+    if not new_line_id:
+        raise HTTPException(
+            status_code=400,
+            detail="LINE ID cannot be empty."
+        )
+
+    existing_user = db.execute(
+        select(User).where(
+            User.line_id == new_line_id,
+            User.id != current_user.id
+        )
+    ).scalar_one_or_none()
+
+    if existing_user is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This LINE ID is already linked to another account."
+        )
+
+    current_user.line_id = new_line_id
 
     db.commit()
     db.refresh(current_user)
@@ -1710,19 +1769,11 @@ def line_auth(
         select(User).where(User.line_id == payload.line_id)
     ).scalar_one_or_none()
 
-    # Auto-register if user does not exist
     if user is None:
-        user = User(
-            email=f"{payload.line_id}@line.example.com",
-            full_name=f"LINE User {payload.line_id}",
-            password_hash=get_password_hash(payload.line_id),
-            is_admin=False,
-            line_id=payload.line_id,
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No account is linked to this LINE ID.",
         )
-
-        db.add(user)
-        db.commit()
-        db.refresh(user)
 
     token = create_access_token({
         "sub": str(user.id),
