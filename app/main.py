@@ -133,19 +133,6 @@ class User(Base):
 
 #Admin
 
-class ChartPoint(BaseModel):
-    label: str
-    value: int | float
-
-
-class AdminOverviewResponse(BaseModel):
-    total_users: int
-    total_teams: int
-    trips_overview: list[ChartPoint]
-    top_transport_modes: list[ChartPoint]
-    recent_support_tickets: list[dict]
-    recent_audit_logs: list[dict]
-
 class AdminUserTeamResponse(BaseModel):
     id: int
     name: str
@@ -161,12 +148,12 @@ class AdminUserItemResponse(BaseModel):
     is_admin: bool
     created_at: datetime
 
+
 class AdminUsersSummaryResponse(BaseModel):
     total_users: int
     total_teams: int
     total_trips: int
     total_points: int
-
 
 
 class AdminUsersResponse(BaseModel):
@@ -175,8 +162,6 @@ class AdminUsersResponse(BaseModel):
     limit: int
     offset: int
     summary: AdminUsersSummaryResponse
-
-
 
 
 
@@ -354,6 +339,18 @@ class ChartPoint(BaseModel):
     value: int | float
 
 
+
+class AuditLogResponse(BaseModel):
+    id: int
+    admin_id: int | None
+    admin_name: str
+    admin_email: EmailStr
+    action: str
+    entity_type: str
+    entity_id: int | None = None
+    details: str | None = None
+    created_at: datetime
+
 class AdminOverviewResponse(BaseModel):
     total_users: int
     total_teams: int
@@ -362,7 +359,7 @@ class AdminOverviewResponse(BaseModel):
     trips_overview: list[ChartPoint]
     top_transport_modes: list[ChartPoint]
     recent_support_tickets: list[dict]
-    recent_audit_logs: list[dict]
+    recent_audit_logs: list[AuditLogResponse]
 
 
 class AdminUserTeamResponse(BaseModel):
@@ -706,6 +703,83 @@ class MyTeamStatsResponse(BaseModel):
     total_trips: int
     total_distance_km: float
     points: int
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+
+    admin_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    admin_email: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    entity_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    entity_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    details: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+
+def create_audit_log(
+        db: Session,
+        admin: User,
+        action: str,
+        entity_type: str,
+        entity_id: int | None = None,
+        details: str | None = None,
+) -> None:
+    log = AuditLog(
+        admin_id=admin.id,
+        admin_name=admin.full_name,
+        admin_email=admin.email,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        details=details,
+    )
+
+    db.add(log)
+
+
+
 
 
 def get_db() -> Session:
@@ -1375,7 +1449,6 @@ def update_user(
         db: Session = Depends(get_db),
 ) -> User:
 
-    # Only admin can update users
     if not current_user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -1385,16 +1458,33 @@ def update_user(
     user = db.get(User, user_id)
 
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="User not found."
+        )
 
-    # Update line_id
+    changes = []
+
+    # LINE ID
     if payload.line_id is not None:
-        user.line_id = payload.line_id
+        old_line_id = user.line_id
+        new_line_id = payload.line_id.strip()
 
-    # Update team_id
+        if old_line_id != new_line_id:
+            changes.append(
+                f"LINE ID changed from '{old_line_id}' to '{new_line_id}'"
+            )
+
+            user.line_id = new_line_id
+
+    # Team
     if "team_id" in payload.model_fields_set:
-        if payload.team_id is not None:
-            team = db.get(Team, payload.team_id)
+
+        old_team_id = user.team_id
+        new_team_id = payload.team_id
+
+        if new_team_id is not None:
+            team = db.get(Team, new_team_id)
 
             if team is None:
                 raise HTTPException(
@@ -1402,7 +1492,23 @@ def update_user(
                     detail="Team not found."
                 )
 
-        user.team_id = payload.team_id
+        if old_team_id != new_team_id:
+            changes.append(
+                f"Team changed from {old_team_id} to {new_team_id}"
+            )
+
+            user.team_id = new_team_id
+
+    # Create audit log only if something changed
+    if changes:
+        create_audit_log(
+            db=db,
+            admin=current_user,
+            action="UPDATE_USER",
+            entity_type="user",
+            entity_id=user.id,
+            details=f"Updated {user.email}: " + "; ".join(changes),
+        )
 
     db.commit()
     db.refresh(user)
@@ -1468,6 +1574,12 @@ def get_admin_overview(
         )
     ]
 
+    recent_audit_logs = db.execute(
+        select(AuditLog)
+        .order_by(AuditLog.created_at.desc())
+        .limit(5)
+    ).scalars().all()
+
     return AdminOverviewResponse(
         total_users=total_users,
         total_teams=total_teams,
@@ -1476,7 +1588,20 @@ def get_admin_overview(
         trips_overview=trips_overview,
         top_transport_modes=top_transport_modes,
         recent_support_tickets=[],
-        recent_audit_logs=[],
+        recent_audit_logs=[
+            AuditLogResponse(
+                id=log.id,
+                admin_id=log.admin_id,
+                admin_name=log.admin_name,
+                admin_email=log.admin_email,
+                action=log.action,
+                entity_type=log.entity_type,
+                entity_id=log.entity_id,
+                details=log.details,
+                created_at=log.created_at,
+            )
+            for log in recent_audit_logs
+        ],
     )
 
 @app.delete(
@@ -1488,6 +1613,7 @@ def delete_user_by_admin(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> MessageResponse:
+
     if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1502,17 +1628,35 @@ def delete_user_by_admin(
             detail="User not found.",
         )
 
-    # Prevent accidental deletion of the currently authenticated admin.
+    # Prevent admin from deleting their own account
     if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You cannot delete your own admin account through this endpoint.",
         )
 
+    # Save these BEFORE deleting the user
+    deleted_user_id = user.id
+    deleted_user_email = user.email
+    deleted_user_name = user.full_name
+
     try:
         preserved_points = delete_user_account(
             db=db,
             user=user,
+        )
+
+        create_audit_log(
+            db=db,
+            admin=current_user,
+            action="DELETE_USER",
+            entity_type="user",
+            entity_id=deleted_user_id,
+            details=(
+                f"Deleted user {deleted_user_name} "
+                f"({deleted_user_email}). "
+                f"Preserved team points: {preserved_points}"
+            ),
         )
 
         db.commit()
@@ -2401,35 +2545,67 @@ def update_team(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> TeamResponse:
+
+    # Only admins can update teams
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can update teams.",
+        )
+
+    # Find the team
     team = db.get(Team, team_id)
 
     if team is None:
-        raise HTTPException(status_code=404, detail="Team not found.")
-
-    if not current_user.is_admin and current_user.team_id != team_id:
         raise HTTPException(
-            status_code=403,
-            detail="You can only update your own team."
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Team not found.",
         )
 
+    # Save old name for the audit log
+    old_team_name = team.name
+
     if payload.team_name is not None:
+        new_team_name = payload.team_name.strip()
+
+        # Prevent duplicate team names
         existing_team = db.execute(
             select(Team).where(
-                Team.name == payload.team_name,
+                Team.name == new_team_name,
                 Team.id != team_id,
                 )
         ).scalar_one_or_none()
 
         if existing_team is not None:
-            raise HTTPException(status_code=409, detail="Team name already exists.")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Team name already exists.",
+            )
 
-        team.name = payload.team_name
+        # Only update/log if the name actually changed
+        if old_team_name != new_team_name:
+            team.name = new_team_name
 
+            create_audit_log(
+                db=db,
+                admin=current_user,
+                action="UPDATE_TEAM",
+                entity_type="team",
+                entity_id=team.id,
+                details=(
+                    f"Renamed team '{old_team_name}' "
+                    f"to '{new_team_name}'."
+                ),
+            )
+
+    # Save team update + audit log together
     db.commit()
     db.refresh(team)
 
     member_count = db.execute(
-        select(func.count(User.id)).where(User.team_id == team.id)
+        select(func.count(User.id)).where(
+            User.team_id == team.id
+        )
     ).scalar_one()
 
     return TeamResponse(
@@ -2511,40 +2687,60 @@ def get_team_members(
         members=members,
     )
 
-@app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/v1/teams",
+    response_model=TeamResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_team(
         payload: TeamCreateRequest,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> TeamResponse:
+
+    # Only admins are allowed to create teams
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can create teams.",
+        )
+
+    # Prevent duplicate team names
     existing_team = db.execute(
         select(Team).where(Team.name == payload.team_name)
     ).scalar_one_or_none()
 
     if existing_team is not None:
-        raise HTTPException(status_code=409, detail="Team name already exists.")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Team name already exists.",
+        )
 
-    if not current_user.is_admin and current_user.team_id is not None:
-        raise HTTPException(status_code=400, detail="You are already in a team.")
-
+    # Create the team
     team = Team(name=payload.team_name)
     db.add(team)
+
+    # Generate team.id before creating the audit log
     db.flush()
 
-    member_count = 0
+    # Record the admin action
+    create_audit_log(
+        db=db,
+        admin=current_user,
+        action="CREATE_TEAM",
+        entity_type="team",
+        entity_id=team.id,
+        details=f"Created team '{team.name}'.",
+    )
 
-    if not current_user.is_admin:
-        current_user.team_id = team.id
-        member_count = 1
-
+    # Save team + audit log in the same transaction
     db.commit()
     db.refresh(team)
-    db.refresh(current_user)
 
     return TeamResponse(
         id=team.id,
         name=team.name,
-        member_count=member_count,
+        member_count=0,
     )
 
 @app.delete("/api/v1/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -2565,113 +2761,65 @@ def delete_team(
         select(User).where(User.team_id == team_id)
     ).scalars().all()
 
+    team_name = team.name
+    member_count = len(users)
+
     for user in users:
         user.team_id = None
 
     db.delete(team)
+
+    create_audit_log(
+        db=db,
+        admin=current_user,
+        action="DELETE_TEAM",
+        entity_type="team",
+        entity_id=team_id,
+        details=(
+            f"Deleted team '{team_name}' "
+            f"with {member_count} member(s)."
+        ),
+    )
+
     db.commit()
 
 
-#Admin
+
 @app.get(
-    "/api/v1/admin/overview",
-    response_model=AdminOverviewResponse,
+    "/api/v1/admin/audit-logs",
+    response_model=list[AuditLogResponse],
 )
-def get_admin_overview(
+def get_admin_audit_logs(
+        limit: int = Query(default=50, ge=1, le=200),
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
-) -> AdminOverviewResponse:
+) -> list[AuditLogResponse]:
 
     if not current_user.is_admin:
         raise HTTPException(
             status_code=403,
-            detail="Only admins can view admin overview.",
+            detail="Only admins can view audit logs.",
         )
-
-    now = datetime.now(timezone.utc)
-    seven_days_ago = now - timedelta(days=6)
-
-    users = db.execute(
-        select(User)
+    rows = db.execute(
+        select(AuditLog)
+        .order_by(
+            AuditLog.created_at.desc(),
+            AuditLog.id.desc(),
+        )
+        .limit(limit)
     ).scalars().all()
 
-    teams = db.execute(
-        select(Team)
-    ).scalars().all()
-
-    trips = db.execute(
-        select(Trip)
-    ).scalars().all()
-
-    total_users = len(users)
-    total_teams = len(teams)
-    total_trips = len(trips)
-
-    total_co2_saved_kg = round(
-        sum(
-            float(trip.co2_saved_kg or 0)
-            for trip in trips
-        ),
-        3,
-    )
-
-    trips_overview = []
-
-    for i in range(7):
-        day = seven_days_ago + timedelta(days=i)
-
-        day_start = datetime.combine(
-            day.date(),
-            datetime.min.time(),
-            tzinfo=timezone.utc,
+    return [
+        AuditLogResponse(
+            id=log.id,
+            admin_id=log.admin_id,
+            admin_name=log.admin_name,
+            admin_email=log.admin_email,
+            action=log.action,
+            entity_type=log.entity_type,
+            entity_id=log.entity_id,
+            details=log.details,
+            created_at=log.created_at,
         )
-
-        day_end = day_start + timedelta(days=1)
-
-        count = sum(
-            1
-            for trip in trips
-            if to_utc(trip.trip_time)
-            and day_start
-            <= to_utc(trip.trip_time)
-            < day_end
-        )
-
-        trips_overview.append(
-            ChartPoint(
-                label=day.date().isoformat(),
-                value=count,
-            )
-        )
-
-    mode_counts: dict[str, int] = {}
-
-    for trip in trips:
-        mode = trip.transport_mode or "other"
-
-        mode_counts[mode] = (
-                mode_counts.get(mode, 0) + 1
-        )
-
-    top_transport_modes = [
-        ChartPoint(
-            label=mode,
-            value=count,
-        )
-        for mode, count in sorted(
-            mode_counts.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )
+        for log in rows
     ]
-
-    return AdminOverviewResponse(
-        total_users=total_users,
-        total_teams=total_teams,
-        total_trips=total_trips,
-        total_co2_saved_kg=total_co2_saved_kg,
-        trips_overview=trips_overview,
-        top_transport_modes=top_transport_modes,
-        recent_support_tickets=[],
-        recent_audit_logs=[],
-    )
