@@ -2034,18 +2034,45 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
 
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user = authenticate_user(db, payload.email, payload.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+def login(
+        payload: LoginRequest,
+        db: Session = Depends(get_db),
+) -> TokenResponse:
 
+    # 1. Find user by email
+    user = db.execute(
+        select(User).where(
+            func.lower(User.email) == payload.email.lower()
+        )
+    ).scalar_one_or_none()
+
+    # 2. Email does not exist
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This email is not registered.",
+        )
+
+    # 3. Email exists, but password is wrong
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password is incorrect.",
+        )
+
+    # 4. Demo admin
     if user.email == DEMO_ADMIN_EMAIL:
         user.is_admin = True
         db.commit()
         db.refresh(user)
 
+    # 5. Login successful
+    token = create_access_token({
+        "sub": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
+    })
 
-    token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
 #login using line-id endpoint
