@@ -1612,53 +1612,107 @@ def update_user(
 
 @app.get("/api/v1/admin/overview", response_model=AdminOverviewResponse)
 def get_admin_overview(
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> AdminOverviewResponse:
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Only admins can view admin overview.")
 
-    now = datetime.now(timezone.utc)
-    seven_days_ago = now - timedelta(days=6)
+    today = datetime.now(timezone.utc).date()
+
+    if to_date is None:
+        to_date = today
+
+    if from_date is None:
+        from_date = to_date - timedelta(days=6)
+
+    if from_date > to_date:
+        raise HTTPException(
+            status_code=400,
+            detail="'from' date cannot be after 'to' date."
+        )
+
+    # Inclusive selected dates:
+    # from_date 00:00 <= trip_time < day after to_date 00:00
+    start_datetime = datetime.combine(
+        from_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    )
+
+    end_datetime = datetime.combine(
+        to_date + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+        )
 
     users = db.execute(select(User)).scalars().all()
     teams = db.execute(select(Team)).scalars().all()
-    trips = db.execute(select(Trip)).scalars().all()
+    all_trips = db.execute(select(Trip)).scalars().all()
 
     total_users = len(users)
     total_teams = len(teams)
-    total_trips = len(trips)
+    total_trips = len(all_trips)
 
-    # Same CO2 saved logic as global statistics: legacy Trip.co2_saved_kg
-    total_co2_saved_kg = round(sum(trip.co2_saved_kg for trip in trips), 3)
+    total_co2_saved_kg = round(
+        sum(trip.co2_saved_kg for trip in all_trips),
+        3,
+    )
+
+    selected_trips = [
+        trip
+        for trip in all_trips
+        if (
+                to_utc(trip.trip_time) is not None
+                and start_datetime
+                <= to_utc(trip.trip_time)
+                < end_datetime
+        )
+    ]
+
 
     trips_overview = []
-    for i in range(7):
-        day = seven_days_ago + timedelta(days=i)
-        day_start = datetime.combine(day.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+    number_of_days = (to_date - from_date).days + 1
+
+    for i in range(number_of_days):
+        current_date = from_date + timedelta(days=i)
+
+        day_start = datetime.combine(
+            current_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
         day_end = day_start + timedelta(days=1)
 
         count = sum(
             1
-            for trip in trips
-            if to_utc(trip.trip_time)
-            and day_start <= to_utc(trip.trip_time) < day_end
+            for trip in selected_trips
+            if day_start <= to_utc(trip.trip_time) < day_end
         )
 
         trips_overview.append(
             ChartPoint(
-                label=day.date().isoformat(),
+                label=current_date.isoformat(),
                 value=count,
             )
         )
 
     mode_counts: dict[str, int] = {}
 
-    for trip in trips:
-        mode_counts[trip.transport_mode] = mode_counts.get(trip.transport_mode, 0) + 1
+    for trip in selected_trips:
+        mode_counts[trip.transport_mode] = (
+                mode_counts.get(trip.transport_mode, 0) + 1
+        )
 
     top_transport_modes = [
-        ChartPoint(label=mode, value=count)
+        ChartPoint(
+            label=mode,
+            value=count,
+        )
         for mode, count in sorted(
             mode_counts.items(),
             key=lambda item: item[1],
