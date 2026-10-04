@@ -432,6 +432,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class MessageResponse(BaseModel):
     message: str
 
@@ -1434,6 +1439,46 @@ def on_startup() -> None:
     if ENABLE_DEMO_SEED:
         with SessionLocal() as db:
             seed_demo_data(db)
+
+@app.post(
+    "/api/v1/users/me/change-password",
+    response_model=MessageResponse,
+)
+def change_my_password(
+        payload: ChangePasswordRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+
+    if not verify_password(
+            payload.current_password,
+            current_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+
+    if verify_password(
+            payload.new_password,
+            current_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password.",
+        )
+
+    current_user.password_hash = get_password_hash(
+        payload.new_password
+    )
+
+    db.commit()
+
+    return MessageResponse(
+        message="Password changed successfully."
+    )
+
+
 
 
 @app.get("/api/v1/health")
