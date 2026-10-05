@@ -10,7 +10,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, select
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine,delete, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 
@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv(
 )
 SECRET_KEY = os.getenv("SECRET_KEY", "demo-secret-key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "43200"))
 AUTO_CREATE_SCHEMA = os.getenv("AUTO_CREATE_SCHEMA", "true").lower() == "true"
 ENABLE_DEMO_SEED = os.getenv("ENABLE_DEMO_SEED", "false").lower() == "true"
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
@@ -115,8 +115,53 @@ class User(Base):
     study_trips: Mapped[list["StudyTrip"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     shisa_messages: Mapped[list["ShisaMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
-    line_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+
+
+    line_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    team_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("teams.id"),
+        nullable=True,
+        index=True
+    )
+
+
+#Admin
+
+class AdminUserTeamResponse(BaseModel):
+    id: int
+    name: str
+
+
+class AdminUserItemResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    team: AdminUserTeamResponse | None = None
+    points: int
+    trips: int
+    is_admin: bool
+    created_at: datetime
+
+
+class AdminUsersSummaryResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_points: int
+
+
+class AdminUsersResponse(BaseModel):
+    items: list[AdminUserItemResponse]
+    total: int
+    limit: int
+    offset: int
+    summary: AdminUsersSummaryResponse
 
 
 
@@ -128,6 +173,9 @@ class Team(Base):
     total_co2_saved_kg: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_trips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_distance_km: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    # Points contributed by users whose accounts were deleted.
+    preserved_points: Mapped[int] = mapped_column(Integer, default=0,nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -284,6 +332,66 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+#Admin
+class ChartPoint(BaseModel):
+    label: str
+    value: int | float
+
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    admin_id: int | None
+    admin_name: str
+    admin_email: EmailStr
+    action: str
+    entity_type: str
+    entity_id: int | None = None
+    details: str | None = None
+    created_at: datetime
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_co2_saved_kg: float
+    trips_overview: list[ChartPoint]
+    top_transport_modes: list[ChartPoint]
+    recent_support_tickets: list[dict]
+    recent_audit_logs: list[AuditLogResponse]
+
+
+class AdminUserTeamResponse(BaseModel):
+    id: int
+    name: str
+
+
+class AdminUserItemResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    team: AdminUserTeamResponse | None = None
+    points: int
+    trips: int
+    is_admin: bool
+    created_at: datetime
+
+
+class AdminUsersSummaryResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    total_trips: int
+    total_points: int
+
+class AdminUsersResponse(BaseModel):
+    items: list[AdminUserItemResponse]
+    total: int
+    limit: int
+    offset: int
+    summary: AdminUsersSummaryResponse
+
+
 #user update schema
 class UserUpdateRequest(BaseModel):
     team_id: int | None = None
@@ -321,6 +429,11 @@ class ForgotPasswordResponse(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
 
 
@@ -512,6 +625,8 @@ class LeaderboardEntry(BaseModel):
     user_id: int
     full_name: str
     email: EmailStr
+    team_name: str | None = None
+    points: int
     total_co2_saved_kg: float
     total_trips: int
     total_distance_km: float
@@ -595,6 +710,83 @@ class MyTeamStatsResponse(BaseModel):
     points: int
 
 
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    admin_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+
+    admin_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    admin_email: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    entity_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    entity_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    details: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+
+def create_audit_log(
+        db: Session,
+        admin: User,
+        action: str,
+        entity_type: str,
+        entity_id: int | None = None,
+        details: str | None = None,
+) -> None:
+    log = AuditLog(
+        admin_id=admin.id,
+        admin_name=admin.full_name,
+        admin_email=admin.email,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        details=details,
+    )
+
+    db.add(log)
+
+
+
+
+
 def get_db() -> Session:
     db = SessionLocal()
     try:
@@ -651,6 +843,58 @@ def ensure_user_access(target_user_id: int, current_user: User) -> None:
     if current_user.is_admin or current_user.id == target_user_id:
         return
     raise HTTPException(status_code=403, detail="You are not allowed to access this user's data.")
+
+def delete_user_account(
+        db: Session,
+        user: User,
+) -> int:
+    preserved_points = 0
+
+    if user.team_id is not None:
+        team = db.get(Team, user.team_id)
+
+        if team is not None:
+            preserved_points = int(
+                db.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(
+                                func.coalesce(
+                                    StudyTrip.points,
+                                    StudyTrip.total_points,
+                                )
+                            ),
+                            0,
+                        )
+                    ).where(StudyTrip.user_id == user.id)
+                ).scalar_one()
+            )
+
+            team.preserved_points += preserved_points
+
+    db.execute(
+        delete(TeamMember).where(
+            TeamMember.user_id == user.id
+        )
+    )
+
+    db.execute(
+        delete(PointHistory).where(
+            PointHistory.user_id == user.id
+        )
+    )
+
+    db.execute(
+        delete(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id
+        )
+    )
+
+    db.delete(user)
+
+    return preserved_points
+
+
 
 
 def parse_date_filters(from_date: date | None, to_date: date | None) -> tuple[datetime | None, datetime | None]:
@@ -717,14 +961,14 @@ def build_leg_dicts(payload: TripCreateRequest) -> list[dict[str, Any]]:
         return leg_dicts
 
     if not all(
-        [
-            payload.origin,
-            payload.destination,
-            payload.transport_mode,
-            payload.distance_km,
-            payload.co2_emission_kg is not None,
-            payload.co2_saved_kg is not None,
-        ]
+            [
+                payload.origin,
+                payload.destination,
+                payload.transport_mode,
+                payload.distance_km,
+                payload.co2_emission_kg is not None,
+                payload.co2_saved_kg is not None,
+            ]
     ):
         raise HTTPException(
             status_code=422,
@@ -831,10 +1075,10 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
 
 
 def query_study_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
     if start is not None:
@@ -846,10 +1090,10 @@ def query_study_trips(
 
 
 def query_legacy_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[Trip]:
     stmt = select(Trip).where(Trip.user_id == user_id)
     if start is not None:
@@ -861,10 +1105,10 @@ def query_legacy_trips(
 
 
 def get_trip_history_items(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[TripHistoryItemResponse]:
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
@@ -899,10 +1143,10 @@ def serialize_shisa_message(message: ShisaMessage) -> ShisaChatResponse:
 
 
 def calculate_stats(
-    db: Session,
-    user_id: int | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
+        db: Session,
+        user_id: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
 ) -> StatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -950,9 +1194,9 @@ def calculate_stats(
 
 
 def calculate_daily_global_stats(
-    db: Session,
-    from_date: date | None = None,
-    to_date: date | None = None,
+        db: Session,
+        from_date: date | None = None,
+        to_date: date | None = None,
 ) -> DailyGlobalStatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -1054,7 +1298,7 @@ def seed_demo_data(db: Session) -> None:
                 Trip.destination == demo_trip.destination,
                 Trip.transport_mode == demo_trip.transport_mode,
                 Trip.distance_km == demo_trip.distance_km,
-            )
+                )
         ).scalar_one_or_none()
         if trip_exists is None:
             db.add(demo_trip)
@@ -1085,8 +1329,34 @@ def post_update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
+
     if payload.line_id is not None:
-        user.line_id = payload.line_id
+        new_line_id = payload.line_id.strip()
+
+    if not new_line_id:
+        raise HTTPException(
+            status_code=400,
+            detail="LINE ID cannot be empty."
+        )
+
+    existing_user = db.execute(
+        select(User).where(
+            User.line_id == new_line_id,
+            User.id != current_user.id
+        )
+    ).scalar_one_or_none()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail="This LINE ID is already linked to another account."
+        )
+
+    current_user.line_id = new_line_id
+
+
+
+
 
     if payload.team_id is not None:
         team = db.get(Team, payload.team_id)
@@ -1104,6 +1374,11 @@ def post_update_user(
 class MyUserUpdateRequest(BaseModel):
     team_id: int | None = None
     line_id: str | None = None
+    current_password: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
 
 @app.patch("/api/v1/users/me", response_model=UserResponse)
 def update_me(
@@ -1132,14 +1407,77 @@ def update_me(
 
         current_user.team_id = payload.team_id
 
+    # LINE ID
+    if "line_id" in payload.model_fields_set:
+        if not payload.current_password:
+            raise HTTPException(
+                status_code=400,
+                detail="Current password is required to change your LINE ID."
+            )
 
-    if payload.line_id is not None:
-        current_user.line_id = payload.line_id
+        if not verify_password(
+                payload.current_password,
+                current_user.password_hash
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Current password is incorrect."
+            )
+
+        # null or empty string = remove LINE ID
+        if payload.line_id is None:
+            new_line_id = None
+        else:
+            new_line_id = payload.line_id.strip() or None
+
+        if new_line_id is not None:
+            existing_user = db.execute(
+                select(User).where(
+                    User.line_id == new_line_id,
+                    User.id != current_user.id
+                )
+            ).scalar_one_or_none()
+
+            if existing_user is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This LINE ID is already linked to another account."
+                )
+
+        current_user.line_id = new_line_id
 
     db.commit()
     db.refresh(current_user)
 
     return current_user
+
+class VerifyPasswordRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
+@app.post(
+    "/api/v1/users/me/verify-password",
+    response_model=MessageResponse,
+)
+def verify_my_password(
+        payload: VerifyPasswordRequest,
+        current_user: User = Depends(get_current_user),
+) -> MessageResponse:
+
+    if not verify_password(
+            payload.password,
+            current_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password is incorrect.",
+        )
+
+    return MessageResponse(
+        message="Password verified."
+    )
+
+
 
 @app.on_event("startup")
 def on_startup() -> None:
@@ -1148,6 +1486,46 @@ def on_startup() -> None:
     if ENABLE_DEMO_SEED:
         with SessionLocal() as db:
             seed_demo_data(db)
+
+@app.post(
+    "/api/v1/users/me/change-password",
+    response_model=MessageResponse,
+)
+def change_my_password(
+        payload: ChangePasswordRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+
+    if not verify_password(
+            payload.current_password,
+            current_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+
+    if verify_password(
+            payload.new_password,
+            current_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password.",
+        )
+
+    current_user.password_hash = get_password_hash(
+        payload.new_password
+    )
+
+    db.commit()
+
+    return MessageResponse(
+        message="Password changed successfully."
+    )
+
+
 
 
 @app.get("/api/v1/health")
@@ -1163,7 +1541,6 @@ def update_user(
         db: Session = Depends(get_db),
 ) -> User:
 
-    # Only admin can update users
     if not current_user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -1173,16 +1550,33 @@ def update_user(
     user = db.get(User, user_id)
 
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="User not found."
+        )
 
-    # Update line_id
+    changes = []
+
+    # LINE ID
     if payload.line_id is not None:
-        user.line_id = payload.line_id
+        old_line_id = user.line_id
+        new_line_id = payload.line_id.strip()
 
-    # Update team_id
+        if old_line_id != new_line_id:
+            changes.append(
+                f"LINE ID changed from '{old_line_id}' to '{new_line_id}'"
+            )
+
+            user.line_id = new_line_id
+
+    # Team
     if "team_id" in payload.model_fields_set:
-        if payload.team_id is not None:
-            team = db.get(Team, payload.team_id)
+
+        old_team_id = user.team_id
+        new_team_id = payload.team_id
+
+        if new_team_id is not None:
+            team = db.get(Team, new_team_id)
 
             if team is None:
                 raise HTTPException(
@@ -1190,7 +1584,23 @@ def update_user(
                     detail="Team not found."
                 )
 
-        user.team_id = payload.team_id
+        if old_team_id != new_team_id:
+            changes.append(
+                f"Team changed from {old_team_id} to {new_team_id}"
+            )
+
+            user.team_id = new_team_id
+
+    # Create audit log only if something changed
+    if changes:
+        create_audit_log(
+            db=db,
+            admin=current_user,
+            action="UPDATE_USER",
+            entity_type="user",
+            entity_id=user.id,
+            details=f"Updated {user.email}: " + "; ".join(changes),
+        )
 
     db.commit()
     db.refresh(user)
@@ -1198,7 +1608,413 @@ def update_user(
     return user
 
 
+#Admin
 
+@app.get("/api/v1/admin/overview", response_model=AdminOverviewResponse)
+def get_admin_overview(
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> AdminOverviewResponse:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can view admin overview.")
+
+    today = datetime.now(timezone.utc).date()
+
+    if to_date is None:
+        to_date = today
+
+    if from_date is None:
+        from_date = to_date - timedelta(days=6)
+
+    if from_date > to_date:
+        raise HTTPException(
+            status_code=400,
+            detail="'from' date cannot be after 'to' date."
+        )
+
+    # Inclusive selected dates:
+    # from_date 00:00 <= trip_time < day after to_date 00:00
+    start_datetime = datetime.combine(
+        from_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    )
+
+    end_datetime = datetime.combine(
+        to_date + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+        )
+
+    users = db.execute(select(User)).scalars().all()
+    teams = db.execute(select(Team)).scalars().all()
+    all_trips = db.execute(select(Trip)).scalars().all()
+
+    total_users = len(users)
+    total_teams = len(teams)
+    total_trips = len(all_trips)
+
+    total_co2_saved_kg = round(
+        sum(trip.co2_saved_kg for trip in all_trips),
+        3,
+    )
+
+    selected_trips = [
+        trip
+        for trip in all_trips
+        if (
+                to_utc(trip.trip_time) is not None
+                and start_datetime
+                <= to_utc(trip.trip_time)
+                < end_datetime
+        )
+    ]
+
+
+    trips_overview = []
+
+    number_of_days = (to_date - from_date).days + 1
+
+    for i in range(number_of_days):
+        current_date = from_date + timedelta(days=i)
+
+        day_start = datetime.combine(
+            current_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
+        day_end = day_start + timedelta(days=1)
+
+        count = sum(
+            1
+            for trip in selected_trips
+            if day_start <= to_utc(trip.trip_time) < day_end
+        )
+
+        trips_overview.append(
+            ChartPoint(
+                label=current_date.isoformat(),
+                value=count,
+            )
+        )
+
+    mode_counts: dict[str, int] = {}
+
+    for trip in selected_trips:
+        mode_counts[trip.transport_mode] = (
+                mode_counts.get(trip.transport_mode, 0) + 1
+        )
+
+    top_transport_modes = [
+        ChartPoint(
+            label=mode,
+            value=count,
+        )
+        for mode, count in sorted(
+            mode_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+
+    recent_audit_logs = db.execute(
+        select(AuditLog)
+        .order_by(AuditLog.created_at.desc())
+        .limit(5)
+    ).scalars().all()
+
+    return AdminOverviewResponse(
+        total_users=total_users,
+        total_teams=total_teams,
+        total_trips=total_trips,
+        total_co2_saved_kg=total_co2_saved_kg,
+        trips_overview=trips_overview,
+        top_transport_modes=top_transport_modes,
+        recent_support_tickets=[],
+        recent_audit_logs=[
+            AuditLogResponse(
+                id=log.id,
+                admin_id=log.admin_id,
+                admin_name=log.admin_name,
+                admin_email=log.admin_email,
+                action=log.action,
+                entity_type=log.entity_type,
+                entity_id=log.entity_id,
+                details=log.details,
+                created_at=log.created_at,
+            )
+            for log in recent_audit_logs
+        ],
+    )
+
+@app.delete(
+    "/api/v1/admin/users/{user_id}",
+    response_model=MessageResponse,
+)
+def delete_user_by_admin(
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can delete users.",
+        )
+
+    user = db.get(User, user_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    # Prevent admin from deleting their own account
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own admin account through this endpoint.",
+        )
+
+    # Save these BEFORE deleting the user
+    deleted_user_id = user.id
+    deleted_user_email = user.email
+    deleted_user_name = user.full_name
+
+    try:
+        preserved_points = delete_user_account(
+            db=db,
+            user=user,
+        )
+
+        create_audit_log(
+            db=db,
+            admin=current_user,
+            action="DELETE_USER",
+            entity_type="user",
+            entity_id=deleted_user_id,
+            details=(
+                f"Deleted user {deleted_user_name} "
+                f"({deleted_user_email}). "
+                f"Preserved team points: {preserved_points}"
+            ),
+        )
+
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="User deletion failed.",
+        )
+
+    return MessageResponse(
+        message=(
+            "User and associated personal/study data deleted. "
+            f"{preserved_points} points remain with the team."
+        )
+    )
+
+
+@app.get(
+    "/api/v1/admin/users",
+    response_model=AdminUsersResponse,
+)
+def get_admin_users(
+        limit: int = Query(default=10, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        registered: str = Query(default="all"),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> AdminUsersResponse:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can view users.",
+        )
+
+    # Registered date filter
+    now = datetime.now(timezone.utc)
+
+    user_filters = []
+
+    if registered == "today":
+        start_date = datetime.combine(
+            now.date(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
+        end_date = start_date + timedelta(days=1)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+        user_filters.append(
+            User.created_at < end_date
+        )
+
+    elif registered == "week":
+        start_date = now - timedelta(days=7)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered == "month":
+        start_date = now - timedelta(days=30)
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered == "year":
+        start_date = datetime(
+            now.year,
+            1,
+            1,
+            tzinfo=timezone.utc,
+        )
+
+        user_filters.append(
+            User.created_at >= start_date
+        )
+
+    elif registered != "all":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid registered filter.",
+        )
+    trip_stats = (
+        select(
+            StudyTrip.user_id.label("user_id"),
+            func.count(StudyTrip.id).label("trip_count"),
+            func.coalesce(
+                func.sum(
+                    func.coalesce(
+                        StudyTrip.points,
+                        StudyTrip.total_points,
+                    )
+                ),
+                0,
+            ).label("total_points"),
+        )
+        .group_by(StudyTrip.user_id)
+        .subquery()
+    )
+
+    total_stmt = select(
+        func.count(User.id)
+    )
+
+    if user_filters:
+        total_stmt = total_stmt.where(
+            *user_filters
+        )
+
+    total = db.execute(
+        total_stmt
+    ).scalar_one()
+
+    total_teams = db.execute(
+        select(func.count(Team.id))
+    ).scalar_one()
+
+    total_trips = db.execute(
+        select(func.count(StudyTrip.id))
+    ).scalar_one()
+
+    total_points = db.execute(
+        select(func.coalesce(
+            func.sum(
+                func.coalesce(
+                    StudyTrip.points,
+                    StudyTrip.total_points,
+                )
+            ),
+            0,
+        )
+        )
+    ).scalar_one()
+
+    rows = db.execute(
+        select(
+            User,
+            Team.id.label("team_id"),
+            Team.name.label("team_name"),
+            func.coalesce(
+                trip_stats.c.total_points,
+                0,
+            ).label("points"),
+            func.coalesce(
+                trip_stats.c.trip_count,
+                0,
+            ).label("trips"),
+        )
+        .outerjoin(
+            Team,
+            Team.id == User.team_id,
+            )
+        .outerjoin(
+            trip_stats,
+            trip_stats.c.user_id == User.id,
+            )
+        .order_by(
+            User.created_at.desc(),
+            User.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    items = []
+
+    for user, team_id, team_name, points, trips in rows:
+        team = None
+
+        if team_id is not None:
+            team = AdminUserTeamResponse(
+                id=team_id,
+                name=team_name,
+            )
+
+        items.append(
+            AdminUserItemResponse(
+                id=user.id,
+                full_name=user.full_name,
+                email=user.email,
+                team=team,
+                points=int(points),
+                trips=int(trips),
+                is_admin=user.is_admin,
+                created_at=user.created_at,
+            )
+        )
+
+    return AdminUsersResponse(
+        items=items,
+        total=int(total),
+        limit=limit,
+        offset=offset,
+        summary=AdminUsersSummaryResponse(
+            total_users=int(total),
+            total_teams=int(total_teams),
+            total_trips=int(total_trips),
+            total_points=int(total_points),
+        ),
+    )
 @app.post("/api/v1/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
     existing = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -1218,18 +2034,45 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
 
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user = authenticate_user(db, payload.email, payload.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+def login(
+        payload: LoginRequest,
+        db: Session = Depends(get_db),
+) -> TokenResponse:
 
+    # 1. Find user by email
+    user = db.execute(
+        select(User).where(
+            func.lower(User.email) == payload.email.lower()
+        )
+    ).scalar_one_or_none()
+
+    # 2. Email does not exist
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This email is not registered.",
+        )
+
+    # 3. Email exists, but password is wrong
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password is incorrect.",
+        )
+
+    # 4. Demo admin
     if user.email == DEMO_ADMIN_EMAIL:
         user.is_admin = True
         db.commit()
         db.refresh(user)
 
+    # 5. Login successful
+    token = create_access_token({
+        "sub": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
+    })
 
-    token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
 #login using line-id endpoint
@@ -1243,19 +2086,11 @@ def line_auth(
         select(User).where(User.line_id == payload.line_id)
     ).scalar_one_or_none()
 
-    # Auto-register if user does not exist
     if user is None:
-        user = User(
-            email=f"{payload.line_id}@line.example.com",
-            full_name=f"LINE User {payload.line_id}",
-            password_hash=get_password_hash(payload.line_id),
-            is_admin=False,
-            line_id=payload.line_id,
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No account is linked to this LINE ID.",
         )
-
-        db.add(user)
-        db.commit()
-        db.refresh(user)
 
     token = create_access_token({
         "sub": str(user.id),
@@ -1265,7 +2100,39 @@ def line_auth(
 
     return TokenResponse(access_token=token)
 
+@app.delete(
+    "/api/v1/users/me",
+    response_model=MessageResponse,
+)
+def delete_my_account(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> MessageResponse:
+    try:
+        preserved_points = delete_user_account(
+            db=db,
+            user=current_user,
+        )
 
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Account deletion failed.",
+        )
+
+    return MessageResponse(
+        message=(
+            "Account and associated personal/study data deleted. "
+            f"{preserved_points} points remain with the team."
+        )
+    )
 
 
 @app.post("/api/v1/auth/forgot-password", response_model=ForgotPasswordResponse)
@@ -1343,9 +2210,9 @@ def get_me(current_user: User = Depends(get_current_user)) -> User:
 
 @app.post("/api/v1/trips", response_model=TripHistoryItemResponse, status_code=status.HTTP_201_CREATED)
 def create_trip(
-    payload: TripCreateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        payload: TripCreateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> TripHistoryItemResponse:
     leg_dicts = build_leg_dicts(payload)
 
@@ -1491,9 +2358,9 @@ def add_points(
 
 @app.post("/api/v1/shisa_chat", response_model=ShisaChatResponse, status_code=status.HTTP_201_CREATED)
 def create_shisa_chat_message(
-    payload: ShisaChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        payload: ShisaChatRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> ShisaChatResponse:
     target_user_id = payload.user_id if payload.user_id is not None else current_user.id
     ensure_user_access(target_user_id, current_user)
@@ -1513,9 +2380,9 @@ def create_shisa_chat_message(
 
 @app.get("/api/v1/shisa_chat/{user_id}", response_model=list[ShisaChatResponse])
 def get_shisa_chat_messages(
-    user_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[ShisaChatResponse]:
     ensure_user_access(user_id, current_user)
     stmt = select(ShisaMessage).where(ShisaMessage.user_id == user_id).order_by(ShisaMessage.created_at.asc())
@@ -1524,10 +2391,10 @@ def get_shisa_chat_messages(
 
 @app.get("/api/v1/shisa_chat/{user_id}/{scope}", response_model=list[ShisaChatResponse])
 def get_shisa_chat_messages_by_scope(
-    user_id: int,
-    scope: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        user_id: int,
+        scope: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> list[ShisaChatResponse]:
     ensure_user_access(user_id, current_user)
     start, end = get_history_window_from_scope(scope)
@@ -1543,28 +2410,28 @@ def get_shisa_chat_messages_by_scope(
 
 @app.get("/api/v1/stats/global", response_model=StatsResponse)
 def get_global_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=None, from_date=from_date, to_date=to_date)
 
 
 @app.get("/api/v1/stats/public/daily", response_model=DailyGlobalStatsResponse)
 def get_public_daily_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        db: Session = Depends(get_db),
 ) -> DailyGlobalStatsResponse:
     return calculate_daily_global_stats(db, from_date=from_date, to_date=to_date)
 
 
 @app.get("/api/v1/stats/me", response_model=StatsResponse)
 def get_my_stats(
-    from_date: date | None = Query(default=None, alias="from"),
-    to_date: date | None = Query(default=None, alias="to"),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        from_date: date | None = Query(default=None, alias="from"),
+        to_date: date | None = Query(default=None, alias="to"),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ) -> StatsResponse:
     return calculate_stats(db, user_id=current_user.id, from_date=from_date, to_date=to_date)
 
@@ -1577,8 +2444,8 @@ def get_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
-            default="total_co2_saved_kg",
-            pattern="^(total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            default="points",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
         ),
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
@@ -1592,6 +2459,21 @@ def get_leaderboard(
         trips = db.execute(
             select(Trip).where(Trip.user_id == user.id)
         ).scalars().all()
+
+        study_trips = db.execute(
+            select(StudyTrip).where(StudyTrip.user_id == user.id)
+        ).scalars().all()
+
+        total_points = sum(
+            trip.points
+            if trip.points is not None
+            else trip.total_points
+            for trip in study_trips
+        )
+
+        team = db.get(Team, user.team_id) if user.team_id is not None else None
+        team_name = team.name if team is not None else None
+
 
         total_co2 = sum(trip.co2_saved_kg for trip in trips)
         total_trips = len(trips)
@@ -1629,6 +2511,8 @@ def get_leaderboard(
                 user_id=user.id,
                 full_name=user.full_name,
                 email=user.email,
+                team_name=team_name,
+                points=int(total_points),
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
@@ -1729,16 +2613,35 @@ def get_team_leaderboard(
             total_co2 = team.total_co2_saved_kg
             total_trips = team.total_trips
             total_distance = team.total_distance_km
-            points = 0
+            active_points = 0
         else:
             trips = db.execute(
-                select(StudyTrip).where(StudyTrip.user_id.in_(user_ids))
+                select(StudyTrip).where(
+                    StudyTrip.user_id.in_(user_ids)
+                )
             ).scalars().all()
 
-            total_co2 = sum(trip.total_co2_saved_kg for trip in trips)
+            total_co2 = sum(
+                trip.total_co2_saved_kg
+                for trip in trips
+            )
             total_trips = len(trips)
-            total_distance = sum(trip.total_distance_km for trip in trips)
-            points = int(sum(trip.points or 0 for trip in trips))
+            total_distance = sum(
+                trip.total_distance_km
+                for trip in trips
+            )
+
+            active_points = sum(
+                trip.points
+                if trip.points is not None
+                else trip.total_points
+                for trip in trips
+            )
+
+        team_points = (
+                team.preserved_points
+                + int(active_points)
+        )
 
         entries.append(
             TeamLeaderboardEntry(
@@ -1748,7 +2651,7 @@ def get_team_leaderboard(
                 total_co2_saved_kg=round(total_co2, 3),
                 total_trips=total_trips,
                 total_distance_km=round(total_distance, 3),
-                points=points,
+                points=team_points,
             )
         )
 
@@ -1815,35 +2718,67 @@ def update_team(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> TeamResponse:
+
+    # Only admins can update teams
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can update teams.",
+        )
+
+    # Find the team
     team = db.get(Team, team_id)
 
     if team is None:
-        raise HTTPException(status_code=404, detail="Team not found.")
-
-    if not current_user.is_admin and current_user.team_id != team_id:
         raise HTTPException(
-            status_code=403,
-            detail="You can only update your own team."
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Team not found.",
         )
 
+    # Save old name for the audit log
+    old_team_name = team.name
+
     if payload.team_name is not None:
+        new_team_name = payload.team_name.strip()
+
+        # Prevent duplicate team names
         existing_team = db.execute(
             select(Team).where(
-                Team.name == payload.team_name,
+                Team.name == new_team_name,
                 Team.id != team_id,
                 )
         ).scalar_one_or_none()
 
         if existing_team is not None:
-            raise HTTPException(status_code=409, detail="Team name already exists.")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Team name already exists.",
+            )
 
-        team.name = payload.team_name
+        # Only update/log if the name actually changed
+        if old_team_name != new_team_name:
+            team.name = new_team_name
 
+            create_audit_log(
+                db=db,
+                admin=current_user,
+                action="UPDATE_TEAM",
+                entity_type="team",
+                entity_id=team.id,
+                details=(
+                    f"Renamed team '{old_team_name}' "
+                    f"to '{new_team_name}'."
+                ),
+            )
+
+    # Save team update + audit log together
     db.commit()
     db.refresh(team)
 
     member_count = db.execute(
-        select(func.count(User.id)).where(User.team_id == team.id)
+        select(func.count(User.id)).where(
+            User.team_id == team.id
+        )
     ).scalar_one()
 
     return TeamResponse(
@@ -1925,40 +2860,60 @@ def get_team_members(
         members=members,
     )
 
-@app.post("/api/v1/teams", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/v1/teams",
+    response_model=TeamResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_team(
         payload: TeamCreateRequest,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> TeamResponse:
+
+    # Only admins are allowed to create teams
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can create teams.",
+        )
+
+    # Prevent duplicate team names
     existing_team = db.execute(
         select(Team).where(Team.name == payload.team_name)
     ).scalar_one_or_none()
 
     if existing_team is not None:
-        raise HTTPException(status_code=409, detail="Team name already exists.")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Team name already exists.",
+        )
 
-    if not current_user.is_admin and current_user.team_id is not None:
-        raise HTTPException(status_code=400, detail="You are already in a team.")
-
+    # Create the team
     team = Team(name=payload.team_name)
     db.add(team)
+
+    # Generate team.id before creating the audit log
     db.flush()
 
-    member_count = 0
+    # Record the admin action
+    create_audit_log(
+        db=db,
+        admin=current_user,
+        action="CREATE_TEAM",
+        entity_type="team",
+        entity_id=team.id,
+        details=f"Created team '{team.name}'.",
+    )
 
-    if not current_user.is_admin:
-        current_user.team_id = team.id
-        member_count = 1
-
+    # Save team + audit log in the same transaction
     db.commit()
     db.refresh(team)
-    db.refresh(current_user)
 
     return TeamResponse(
         id=team.id,
         name=team.name,
-        member_count=member_count,
+        member_count=0,
     )
 
 @app.delete("/api/v1/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1979,8 +2934,65 @@ def delete_team(
         select(User).where(User.team_id == team_id)
     ).scalars().all()
 
+    team_name = team.name
+    member_count = len(users)
+
     for user in users:
         user.team_id = None
 
     db.delete(team)
+
+    create_audit_log(
+        db=db,
+        admin=current_user,
+        action="DELETE_TEAM",
+        entity_type="team",
+        entity_id=team_id,
+        details=(
+            f"Deleted team '{team_name}' "
+            f"with {member_count} member(s)."
+        ),
+    )
+
     db.commit()
+
+
+
+@app.get(
+    "/api/v1/admin/audit-logs",
+    response_model=list[AuditLogResponse],
+)
+def get_admin_audit_logs(
+        limit: int = Query(default=50, ge=1, le=200),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> list[AuditLogResponse]:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can view audit logs.",
+        )
+    rows = db.execute(
+        select(AuditLog)
+        .order_by(
+            AuditLog.created_at.desc(),
+            AuditLog.id.desc(),
+        )
+        .limit(limit)
+    ).scalars().all()
+
+    return [
+        AuditLogResponse(
+            id=log.id,
+            admin_id=log.admin_id,
+            admin_name=log.admin_name,
+            admin_email=log.admin_email,
+            action=log.action,
+            entity_type=log.entity_type,
+            entity_id=log.entity_id,
+            details=log.details,
+            created_at=log.created_at,
+        )
+        for log in rows
+    ]
