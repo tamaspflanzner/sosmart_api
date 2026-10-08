@@ -2571,37 +2571,31 @@ def get_user_rank(
         user_id: int,
         db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    users = db.execute(select(User)).scalars().all()
+    leaderboard = get_leaderboard(
+        limit=200,
+        offset=0,
+        sort_by="points",
+        min_co2_saved=None,
+        min_trips=None,
+        min_eco_score=None,
+        db=db,
+    )
 
-    user_stats = []
-
-    for user in users:
-        total_co2 = db.execute(
-            select(func.coalesce(func.sum(Trip.co2_saved_kg), 0.0))
-            .where(Trip.user_id == user.id)
-        ).scalar_one()
-
-        user_stats.append(
-            {
-                "user_id": user.id,
-                "full_name": user.full_name,
-                "total_co2_saved_kg": float(total_co2),
-            }
-        )
-
-    user_stats.sort(key=lambda item: item["total_co2_saved_kg"], reverse=True)
-
-    for rank, user_stat in enumerate(user_stats, start=1):
-        if user_stat["user_id"] == user_id:
+    for rank, entry in enumerate(leaderboard.entries, start=1):
+        if entry.user_id == user_id:
             return {
                 "user_id": user_id,
-                "full_name": user_stat["full_name"],
+                "full_name": entry.full_name,
                 "rank": rank,
-                "total_co2_saved_kg": round(user_stat["total_co2_saved_kg"], 3),
-                "total_users": len(user_stats),
+                "points": entry.points,
+                "total_co2_saved_kg": entry.total_co2_saved_kg,
+                "total_users": leaderboard.total_users,
             }
 
-    raise HTTPException(status_code=404, detail="User not found.")
+    raise HTTPException(
+        status_code=404,
+        detail="User not found.",
+    )
 
 
 @app.get("/api/v1/leaderboard/teams", response_model=TeamLeaderboardResponse)
