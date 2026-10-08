@@ -2545,10 +2545,19 @@ def get_leaderboard(
             if entry.eco_friendly_percentage >= min_eco_score
         ]
 
-    leaderboard_entries.sort(
-        key=lambda entry: getattr(entry, sort_by),
-        reverse=True,
-    )
+    if sort_by == "points":
+        leaderboard_entries.sort(
+            key=lambda entry: (
+                entry.points or 0,
+                entry.total_co2_saved_kg or 0,
+            ),
+            reverse=True,
+        )
+    else:
+        leaderboard_entries.sort(
+            key=lambda entry: getattr(entry, sort_by),
+            reverse=True,
+        )
 
     total_users = len(leaderboard_entries)
 
