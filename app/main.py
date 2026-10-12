@@ -2079,6 +2079,11 @@ def get_leaderboard(
             default="points",
             pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
         ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
+
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
         min_eco_score: float | None = Query(default=None, ge=0, le=100),
@@ -2177,19 +2182,14 @@ def get_leaderboard(
             if entry.eco_friendly_percentage >= min_eco_score
         ]
 
-    if sort_by == "points":
-        leaderboard_entries.sort(
-            key=lambda entry: (
-                entry.points or 0,
-                entry.total_co2_saved_kg or 0,
-            ),
-            reverse=True,
-        )
-    else:
-        leaderboard_entries.sort(
-            key=lambda entry: getattr(entry, sort_by),
-            reverse=True,
-        )
+    leaderboard_entries.sort(
+        key=lambda entry: (
+            getattr(entry, sort_by) or 0,
+            entry.total_co2_saved_kg if sort_by == "points" else entry.points,
+            -entry.user_id,
+        ),
+        reverse=(sort_order == "desc"),
+    )
 
     total_users = len(leaderboard_entries)
 
@@ -2234,6 +2234,14 @@ def get_user_rank(
 def get_team_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(
+            default="points",
+            pattern="^(member_count|points|total_co2_saved_kg|total_trips|total_distance_km)$",
+        ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
         db: Session = Depends(get_db),
 ) -> TeamLeaderboardResponse:
     teams = db.execute(select(Team)).scalars().all()
@@ -2292,11 +2300,11 @@ def get_team_leaderboard(
 
     entries.sort(
         key=lambda team: (
-            team.points,
-            team.total_co2_saved_kg,
-            team.total_distance_km,
+            getattr(team, sort_by),
+            team.points if sort_by != "points" else team.total_co2_saved_kg,
+            -team.team_id,
         ),
-        reverse=True,
+        reverse=(sort_order == "desc"),
     )
 
     return TeamLeaderboardResponse(
