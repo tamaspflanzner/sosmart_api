@@ -30,6 +30,8 @@ DEMO_ADMIN_PASSWORD = os.getenv("DEMO_ADMIN_PASSWORD", "admin123")
 DEMO_USER_EMAIL = os.getenv("DEMO_USER_EMAIL", "user@example.com")
 DEMO_USER_PASSWORD = os.getenv("DEMO_USER_PASSWORD", "user123")
 
+MAX_TEAM_MEMBERS = 40
+
 
 class Base(DeclarativeBase):
     pass
@@ -1280,8 +1282,12 @@ def update_me(
             select(func.count(User.id)).where(User.team_id == payload.team_id)
         ).scalar_one()
 
-        if member_count >= 6:
-            raise HTTPException(status_code=400, detail="This team is already full.")
+        if member_count >= MAX_TEAM_MEMBERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This team is full. Maximum {MAX_TEAM_MEMBERS} members allowed."
+            )
+
 
         current_user.team_id = payload.team_id
 
@@ -1333,6 +1339,7 @@ def update_user(
         user.line_id = payload.line_id
 
     # Update team_id
+    # Update team_id
     if "team_id" in payload.model_fields_set:
         if payload.team_id is not None:
             team = db.get(Team, payload.team_id)
@@ -1343,7 +1350,27 @@ def update_user(
                     detail="Team not found."
                 )
 
+            if user.team_id != payload.team_id:
+                member_count = db.execute(
+                    select(func.count(User.id)).where(
+                        User.team_id == payload.team_id
+                    )
+                ).scalar_one()
+
+                if member_count >= MAX_TEAM_MEMBERS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This team is full. Maximum 40 members allowed."
+                    )
+
         user.team_id = payload.team_id
+
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+        
 
     db.commit()
     db.refresh(user)
