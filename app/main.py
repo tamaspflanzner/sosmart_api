@@ -2104,7 +2104,7 @@ def get_leaderboard(
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
             default="points",
-            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage|full_name|team_name)$",
         ),
         sort_order: str = Query(
             default="desc",
@@ -2209,14 +2209,25 @@ def get_leaderboard(
             if entry.eco_friendly_percentage >= min_eco_score
         ]
 
-    leaderboard_entries.sort(
-        key=lambda entry: (
-            getattr(entry, sort_by) or 0,
-            entry.total_co2_saved_kg if sort_by == "points" else entry.points,
-            -entry.user_id,
+    if sort_by in ("full_name", "team_name"):
+        leaderboard_entries.sort(
+            key=lambda entry: (
+                (getattr(entry, sort_by) or "").casefold(),
+                entry.user_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
+    else:
+        leaderboard_entries.sort(
+            key=lambda entry: (
+                getattr(entry, sort_by) or 0,
+                entry.total_co2_saved_kg if sort_by == "points" else entry.points,
+                -entry.user_id,
         ),
         reverse=(sort_order == "desc"),
     )
+
+
 
     total_users = len(leaderboard_entries)
 
@@ -2263,7 +2274,7 @@ def get_team_leaderboard(
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
             default="points",
-            pattern="^(member_count|points|total_co2_saved_kg|total_trips|total_distance_km)$",
+            pattern="^(team_name|member_count|points|total_co2_saved_kg|total_trips|total_distance_km)$",
         ),
         sort_order: str = Query(
             default="desc",
@@ -2324,15 +2335,25 @@ def get_team_leaderboard(
                 points=team_points,
             )
         )
+    if sort_by == "team_name":
+        entries.sort(
+            key=lambda team: (
+                team.team_name.casefold(),
+                team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
+    else:
+        entries.sort(
+            key=lambda team: (
+                getattr(team, sort_by),
+                team.points if sort_by != "points" else team.total_co2_saved_kg,
+                -team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
 
-    entries.sort(
-        key=lambda team: (
-            getattr(team, sort_by),
-            team.points if sort_by != "points" else team.total_co2_saved_kg,
-            -team.team_id,
-        ),
-        reverse=(sort_order == "desc"),
-    )
+
 
     return TeamLeaderboardResponse(
         entries=entries[offset: offset + limit],
