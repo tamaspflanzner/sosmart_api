@@ -30,6 +30,8 @@ DEMO_ADMIN_PASSWORD = os.getenv("DEMO_ADMIN_PASSWORD", "admin123")
 DEMO_USER_EMAIL = os.getenv("DEMO_USER_EMAIL", "user@example.com")
 DEMO_USER_PASSWORD = os.getenv("DEMO_USER_PASSWORD", "user123")
 
+MAX_TEAM_MEMBERS = 40
+
 
 class Base(DeclarativeBase):
     pass
@@ -133,6 +135,19 @@ class User(Base):
 
 #Admin
 
+class ChartPoint(BaseModel):
+    label: str
+    value: int | float
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    trips_overview: list[ChartPoint]
+    top_transport_modes: list[ChartPoint]
+    recent_support_tickets: list[dict]
+    recent_audit_logs: list[dict]
+
 class AdminUserTeamResponse(BaseModel):
     id: int
     name: str
@@ -148,12 +163,12 @@ class AdminUserItemResponse(BaseModel):
     is_admin: bool
     created_at: datetime
 
-
 class AdminUsersSummaryResponse(BaseModel):
     total_users: int
     total_teams: int
     total_trips: int
     total_points: int
+
 
 
 class AdminUsersResponse(BaseModel):
@@ -162,6 +177,8 @@ class AdminUsersResponse(BaseModel):
     limit: int
     offset: int
     summary: AdminUsersSummaryResponse
+
+
 
 
 
@@ -1075,10 +1092,10 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
 
 
 def query_study_trips(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
     if start is not None:
@@ -1090,10 +1107,10 @@ def query_study_trips(
 
 
 def query_legacy_trips(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[Trip]:
     stmt = select(Trip).where(Trip.user_id == user_id)
     if start is not None:
@@ -1105,10 +1122,10 @@ def query_legacy_trips(
 
 
 def get_trip_history_items(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[TripHistoryItemResponse]:
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
@@ -1143,10 +1160,10 @@ def serialize_shisa_message(message: ShisaMessage) -> ShisaChatResponse:
 
 
 def calculate_stats(
-        db: Session,
-        user_id: int | None = None,
-        from_date: date | None = None,
-        to_date: date | None = None,
+    db: Session,
+    user_id: int | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> StatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -1402,8 +1419,12 @@ def update_me(
             select(func.count(User.id)).where(User.team_id == payload.team_id)
         ).scalar_one()
 
-        if member_count >= 6:
-            raise HTTPException(status_code=400, detail="This team is already full.")
+        if member_count >= MAX_TEAM_MEMBERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This team is full. Maximum {MAX_TEAM_MEMBERS} members allowed."
+            )
+
 
         current_user.team_id = payload.team_id
 
@@ -1541,6 +1562,7 @@ def update_user(
         db: Session = Depends(get_db),
 ) -> User:
 
+    # Only admin can update users
     if not current_user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -1567,9 +1589,7 @@ def update_user(
                 f"LINE ID changed from '{old_line_id}' to '{new_line_id}'"
             )
 
-            user.line_id = new_line_id
-
-    # Team
+    # Update team_id
     if "team_id" in payload.model_fields_set:
 
         old_team_id = user.team_id
@@ -1584,23 +1604,20 @@ def update_user(
                     detail="Team not found."
                 )
 
-        if old_team_id != new_team_id:
-            changes.append(
-                f"Team changed from {old_team_id} to {new_team_id}"
-            )
+            if user.team_id != payload.team_id:
+                member_count = db.execute(
+                    select(func.count(User.id)).where(
+                        User.team_id == payload.team_id
+                    )
+                ).scalar_one()
 
-            user.team_id = new_team_id
+                if member_count >= MAX_TEAM_MEMBERS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This team is full. Maximum 40 members allowed."
+                    )
 
-    # Create audit log only if something changed
-    if changes:
-        create_audit_log(
-            db=db,
-            admin=current_user,
-            action="UPDATE_USER",
-            entity_type="user",
-            entity_id=user.id,
-            details=f"Updated {user.email}: " + "; ".join(changes),
-        )
+        user.team_id = payload.team_id
 
     db.commit()
     db.refresh(user)
@@ -1921,8 +1938,8 @@ def get_admin_users(
 
     if user_filters:
         total_stmt = total_stmt.where(
-            *user_filters
-        )
+           *user_filters
+    )
 
     total = db.execute(
         total_stmt
@@ -2073,6 +2090,7 @@ def login(
         "is_admin": user.is_admin,
     })
 
+    token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
 #login using line-id endpoint
@@ -2086,11 +2104,16 @@ def line_auth(
         select(User).where(User.line_id == payload.line_id)
     ).scalar_one_or_none()
 
+    # Auto-register if user does not exist
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No account is linked to this LINE ID.",
         )
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
     token = create_access_token({
         "sub": str(user.id),
@@ -2445,8 +2468,13 @@ def get_leaderboard(
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
             default="points",
-            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage|full_name|team_name)$",
         ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
+
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
         min_eco_score: float | None = Query(default=None, ge=0, le=100),
@@ -2465,10 +2493,10 @@ def get_leaderboard(
         ).scalars().all()
 
         total_points = sum(
-            trip.points
-            if trip.points is not None
-            else trip.total_points
-            for trip in study_trips
+           trip.points
+           if trip.points is not None
+           else trip.total_points
+           for trip in study_trips
         )
 
         team = db.get(Team, user.team_id) if user.team_id is not None else None
@@ -2545,19 +2573,25 @@ def get_leaderboard(
             if entry.eco_friendly_percentage >= min_eco_score
         ]
 
-    if sort_by == "points":
+    if sort_by in ("full_name", "team_name"):
         leaderboard_entries.sort(
             key=lambda entry: (
-                entry.points or 0,
-                entry.total_co2_saved_kg or 0,
+                (getattr(entry, sort_by) or "").casefold(),
+                entry.user_id,
             ),
-            reverse=True,
+            reverse=(sort_order == "desc"),
         )
     else:
         leaderboard_entries.sort(
-            key=lambda entry: getattr(entry, sort_by),
-            reverse=True,
-        )
+            key=lambda entry: (
+                getattr(entry, sort_by) or 0,
+                entry.total_co2_saved_kg if sort_by == "points" else entry.points,
+                -entry.user_id,
+        ),
+        reverse=(sort_order == "desc"),
+    )
+
+
 
     total_users = len(leaderboard_entries)
 
@@ -2602,6 +2636,14 @@ def get_user_rank(
 def get_team_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(
+            default="points",
+            pattern="^(team_name|member_count|points|total_co2_saved_kg|total_trips|total_distance_km)$",
+        ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
         db: Session = Depends(get_db),
 ) -> TeamLeaderboardResponse:
     teams = db.execute(select(Team)).scalars().all()
@@ -2657,15 +2699,25 @@ def get_team_leaderboard(
                 points=team_points,
             )
         )
+    if sort_by == "team_name":
+        entries.sort(
+            key=lambda team: (
+                team.team_name.casefold(),
+                team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
+    else:
+        entries.sort(
+            key=lambda team: (
+                getattr(team, sort_by),
+                team.points if sort_by != "points" else team.total_co2_saved_kg,
+                -team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
 
-    entries.sort(
-        key=lambda team: (
-            team.points,
-            team.total_co2_saved_kg,
-            team.total_distance_km,
-        ),
-        reverse=True,
-    )
+
 
     return TeamLeaderboardResponse(
         entries=entries[offset: offset + limit],
@@ -2912,6 +2964,7 @@ def create_team(
     # Save team + audit log in the same transaction
     db.commit()
     db.refresh(team)
+    db.refresh(current_user)
 
     return TeamResponse(
         id=team.id,
@@ -2999,3 +3052,14 @@ def get_admin_audit_logs(
         )
         for log in rows
     ]
+
+    return AdminOverviewResponse(
+        total_users=total_users,
+        total_teams=total_teams,
+        total_trips=total_trips,
+        total_co2_saved_kg=total_co2_saved_kg,
+        trips_overview=trips_overview,
+        top_transport_modes=top_transport_modes,
+        recent_support_tickets=[],
+        recent_audit_logs=[],
+    )
