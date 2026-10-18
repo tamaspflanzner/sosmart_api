@@ -30,6 +30,8 @@ DEMO_ADMIN_PASSWORD = os.getenv("DEMO_ADMIN_PASSWORD", "admin123")
 DEMO_USER_EMAIL = os.getenv("DEMO_USER_EMAIL", "user@example.com")
 DEMO_USER_PASSWORD = os.getenv("DEMO_USER_PASSWORD", "user123")
 
+MAX_TEAM_MEMBERS = 40
+
 
 class Base(DeclarativeBase):
     pass
@@ -129,9 +131,27 @@ class User(Base):
         nullable=True,
         index=True
     )
+    has_joined_team: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
 
 
 #Admin
+
+class ChartPoint(BaseModel):
+    label: str
+    value: int | float
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_teams: int
+    trips_overview: list[ChartPoint]
+    top_transport_modes: list[ChartPoint]
+    recent_support_tickets: list[dict]
+    recent_audit_logs: list[dict]
 
 class AdminUserTeamResponse(BaseModel):
     id: int
@@ -148,12 +168,12 @@ class AdminUserItemResponse(BaseModel):
     is_admin: bool
     created_at: datetime
 
-
 class AdminUsersSummaryResponse(BaseModel):
     total_users: int
     total_teams: int
     total_trips: int
     total_points: int
+
 
 
 class AdminUsersResponse(BaseModel):
@@ -162,6 +182,8 @@ class AdminUsersResponse(BaseModel):
     limit: int
     offset: int
     summary: AdminUsersSummaryResponse
+
+
 
 
 
@@ -246,6 +268,12 @@ class StudyTrip(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     client_trip_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    team_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("teams.id"),
+        nullable=True,
+        index=True,
+    )
     purpose: Mapped[str | None] = mapped_column(String(100), nullable=True)
     begin_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -486,7 +514,7 @@ class TripCreateRequest(BaseModel):
     co2_emission_kg: float | None = Field(default=None, ge=0)
     co2_saved_kg: float | None = Field(default=None, ge=0)
     trip_time: datetime | None = None
-    points: int | None = Field(default=None, ge=0)
+    points: int = Field(ge=0)
 
 
 class TripLegResponse(BaseModel):
@@ -497,7 +525,7 @@ class TripLegResponse(BaseModel):
     distance_km: float
     co2_emission_kg: float
     co2_saved_kg: float
-    points_awarded: int
+    points_awarded: int | None = None
     begin_time: datetime
     end_time: datetime
     travel_time_seconds: int
@@ -514,7 +542,7 @@ class TripHistoryItemResponse(BaseModel):
     total_distance_km: float
     total_co2_emission_kg: float
     total_co2_saved_kg: float
-    total_points: int
+    total_points: int | None = None
     legs: list[TripLegResponse]
     points: int | None = None
 
@@ -667,23 +695,34 @@ def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
     entries = []
 
     for team in teams:
-        user_ids = [member.user_id for member in team.members]
+        members = db.execute(
+            select(User).where(User.team_id == team.id)
+        ).scalars().all()
 
-        trips = []
-        if user_ids:
-            trips = db.execute(
-                select(Trip).where(Trip.user_id.in_(user_ids))
-            ).scalars().all()
+        user_ids = [user.id for user in members]
+
+        study_trips = db.execute(
+            select(StudyTrip).where(StudyTrip.team_id == team.id)
+        ).scalars().all()
+
+        team_points = sum(
+            trip.points if trip.points is not None else trip.total_points
+            for trip in study_trips
+        ) + team.preserved_points
 
         entries.append(
             TeamLeaderboardEntry(
                 team_id=team.id,
                 team_name=team.name,
                 member_count=len(user_ids),
-                total_co2_saved_kg=round(sum(t.co2_saved_kg for t in trips), 3),
-                total_trips=len(trips),
-                total_distance_km=round(sum(t.distance_km for t in trips), 3),
-                points=0,
+                total_co2_saved_kg=round(
+                    sum(trip.total_co2_saved_kg for trip in study_trips), 3
+                ),
+                total_trips=len(study_trips),
+                total_distance_km=round(
+                    sum(trip.total_distance_km for trip in study_trips), 3
+                ),
+                points=int(team_points),
             )
         )
 
@@ -844,33 +883,82 @@ def ensure_user_access(target_user_id: int, current_user: User) -> None:
         return
     raise HTTPException(status_code=403, detail="You are not allowed to access this user's data.")
 
+
+
+def assign_user_to_team(
+        db: Session,
+        user: User,
+        new_team_id: int,
+) -> None:
+    # Transfer pre-join trips only when joining a team for the first time.
+    if not user.has_joined_team:
+        unassigned_trips = db.execute(
+            select(StudyTrip).where(
+                StudyTrip.user_id == user.id,
+                StudyTrip.team_id.is_(None),
+                )
+        ).scalars().all()
+
+        for trip in unassigned_trips:
+            trip.team_id = new_team_id
+
+    # Remember that this user has joined a team before.
+    user.has_joined_team = True
+
+    # Update their current team.
+    user.team_id = new_team_id
+
+
+
+def get_total_user_points(db: Session, user_id: int) -> int:
+    return int(
+        db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(
+                            StudyTrip.points,
+                            StudyTrip.total_points,
+                        )
+                    ),
+                    0,
+                )
+            ).where(StudyTrip.user_id == user_id)
+        )
+    )
+
+
+
+
 def delete_user_account(
         db: Session,
         user: User,
 ) -> int:
     preserved_points = 0
 
-    if user.team_id is not None:
-        team = db.get(Team, user.team_id)
+    team_point_rows = db.execute(
+        select(
+            StudyTrip.team_id,
+            func.sum(
+                func.coalesce(
+                    StudyTrip.points,
+                    StudyTrip.total_points,
+                )
+            ),
+        )
+        .where(
+            StudyTrip.user_id == user.id,
+            StudyTrip.team_id.is_not(None),
+            )
+        .group_by(StudyTrip.team_id)
+    ).all()
+
+    for team_id, points in team_point_rows:
+        team = db.get(Team, team_id)
 
         if team is not None:
-            preserved_points = int(
-                db.execute(
-                    select(
-                        func.coalesce(
-                            func.sum(
-                                func.coalesce(
-                                    StudyTrip.points,
-                                    StudyTrip.total_points,
-                                )
-                            ),
-                            0,
-                        )
-                    ).where(StudyTrip.user_id == user.id)
-                ).scalar_one()
-            )
-
-            team.preserved_points += preserved_points
+            team.preserved_points += int(points or 0)
+            preserved_points += int(points or 0)
 
     db.execute(
         delete(TeamMember).where(
@@ -921,8 +1009,8 @@ def calculate_co2_saved_kg(mode: TransportMode, distance_km: float) -> float:
     return round(max(car_factor - mode_factor, 0.0) * distance_km, 3)
 
 
-def calculate_points(mode: TransportMode, distance_km: float) -> int:
-    return int(round(distance_km * POINTS_PER_KM[mode]))
+#def calculate_points(mode: TransportMode, distance_km: float) -> int:
+#    return int(round(distance_km * POINTS_PER_KM[mode]))
 
 
 def normalize_legacy_transport_mode(mode: TransportMode) -> str:
@@ -1055,7 +1143,7 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
         total_distance_km=round(trip.distance_km, 3),
         total_co2_emission_kg=total_emission,
         total_co2_saved_kg=round(trip.co2_saved_kg, 3),
-        total_points=calculate_points(TransportMode(trip.transport_mode), trip.distance_km),
+        total_points=None,
         legs=[
             TripLegResponse(
                 sequence_no=1,
@@ -1065,7 +1153,7 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
                 distance_km=round(trip.distance_km, 3),
                 co2_emission_kg=total_emission,
                 co2_saved_kg=round(trip.co2_saved_kg, 3),
-                points_awarded=calculate_points(TransportMode(trip.transport_mode), trip.distance_km),
+                points_awarded=None,
                 begin_time=trip.trip_time,
                 end_time=trip.trip_time,
                 travel_time_seconds=0,
@@ -1075,10 +1163,10 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
 
 
 def query_study_trips(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
     if start is not None:
@@ -1090,10 +1178,10 @@ def query_study_trips(
 
 
 def query_legacy_trips(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[Trip]:
     stmt = select(Trip).where(Trip.user_id == user_id)
     if start is not None:
@@ -1105,10 +1193,10 @@ def query_legacy_trips(
 
 
 def get_trip_history_items(
-        db: Session,
-        user_id: int,
-        start: datetime | None = None,
-        end: datetime | None = None,
+    db: Session,
+    user_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[TripHistoryItemResponse]:
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
@@ -1143,10 +1231,10 @@ def serialize_shisa_message(message: ShisaMessage) -> ShisaChatResponse:
 
 
 def calculate_stats(
-        db: Session,
-        user_id: int | None = None,
-        from_date: date | None = None,
-        to_date: date | None = None,
+    db: Session,
+    user_id: int | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> StatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -1364,7 +1452,7 @@ def post_update_user(
         if team is None:
             raise HTTPException(status_code=404, detail="Team not found.")
 
-        user.team_id = payload.team_id
+        assign_user_to_team(db, user, payload.team_id)
 
     db.commit()
     db.refresh(user)
@@ -1402,10 +1490,14 @@ def update_me(
             select(func.count(User.id)).where(User.team_id == payload.team_id)
         ).scalar_one()
 
-        if member_count >= 6:
-            raise HTTPException(status_code=400, detail="This team is already full.")
+        if member_count >= MAX_TEAM_MEMBERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This team is full. Maximum {MAX_TEAM_MEMBERS} members allowed."
+            )
 
-        current_user.team_id = payload.team_id
+
+        assign_user_to_team(db, current_user, payload.team_id)
 
     # LINE ID
     if "line_id" in payload.model_fields_set:
@@ -1541,6 +1633,7 @@ def update_user(
         db: Session = Depends(get_db),
 ) -> User:
 
+    # Only admin can update users
     if not current_user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -1567,9 +1660,7 @@ def update_user(
                 f"LINE ID changed from '{old_line_id}' to '{new_line_id}'"
             )
 
-            user.line_id = new_line_id
-
-    # Team
+    # Update team_id
     if "team_id" in payload.model_fields_set:
 
         old_team_id = user.team_id
@@ -1584,23 +1675,23 @@ def update_user(
                     detail="Team not found."
                 )
 
-        if old_team_id != new_team_id:
-            changes.append(
-                f"Team changed from {old_team_id} to {new_team_id}"
-            )
+            if user.team_id != payload.team_id:
+                member_count = db.execute(
+                    select(func.count(User.id)).where(
+                        User.team_id == payload.team_id
+                    )
+                ).scalar_one()
 
-            user.team_id = new_team_id
+                if member_count >= MAX_TEAM_MEMBERS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This team is full. Maximum 40 members allowed."
+                    )
 
-    # Create audit log only if something changed
-    if changes:
-        create_audit_log(
-            db=db,
-            admin=current_user,
-            action="UPDATE_USER",
-            entity_type="user",
-            entity_id=user.id,
-            details=f"Updated {user.email}: " + "; ".join(changes),
-        )
+        if new_team_id is not None:
+            assign_user_to_team(db, user, new_team_id)
+        else:
+            user.team_id = None
 
     db.commit()
     db.refresh(user)
@@ -1921,8 +2012,8 @@ def get_admin_users(
 
     if user_filters:
         total_stmt = total_stmt.where(
-            *user_filters
-        )
+           *user_filters
+    )
 
     total = db.execute(
         total_stmt
@@ -2073,6 +2164,7 @@ def login(
         "is_admin": user.is_admin,
     })
 
+    token = create_access_token({"sub": str(user.id), "email": user.email, "is_admin": user.is_admin})
     return TokenResponse(access_token=token)
 
 #login using line-id endpoint
@@ -2086,11 +2178,16 @@ def line_auth(
         select(User).where(User.line_id == payload.line_id)
     ).scalar_one_or_none()
 
+    # Auto-register if user does not exist
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No account is linked to this LINE ID.",
         )
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
     token = create_access_token({
         "sub": str(user.id),
@@ -2219,16 +2316,11 @@ def create_trip(
     total_distance_km = 0.0
     total_co2_emission_kg = 0.0
     total_co2_saved_kg = 0.0
-    total_points = 0
 
     for leg_dict in leg_dicts:
-        mode = leg_dict["transport_mode"]
-        distance_km = leg_dict["distance_km"]
-        leg_dict["points_awarded"] = calculate_points(mode, distance_km)
-        total_distance_km += distance_km
+        total_distance_km += leg_dict["distance_km"]
         total_co2_emission_kg += leg_dict["co2_emission_kg"]
         total_co2_saved_kg += leg_dict["co2_saved_kg"]
-        total_points += leg_dict["points_awarded"]
 
     begin_time = min(leg["begin_time"] for leg in leg_dicts)
     end_time = max(leg["end_time"] for leg in leg_dicts)
@@ -2237,6 +2329,7 @@ def create_trip(
     study_trip = StudyTrip(
         client_trip_id=payload.trip_id,
         user_id=current_user.id,
+        team_id=current_user.team_id,
         purpose=payload.purpose,
         begin_time=begin_time,
         end_time=end_time,
@@ -2244,7 +2337,7 @@ def create_trip(
         total_distance_km=round(total_distance_km, 3),
         total_co2_emission_kg=round(total_co2_emission_kg, 3),
         total_co2_saved_kg=round(total_co2_saved_kg, 3),
-        total_points=total_points,
+        total_points=payload.points,
         points=payload.points,
     )
     db.add(study_trip)
@@ -2260,7 +2353,7 @@ def create_trip(
             distance_km=leg_dict["distance_km"],
             co2_emission_kg=leg_dict["co2_emission_kg"],
             co2_saved_kg=leg_dict["co2_saved_kg"],
-            points_awarded=leg_dict["points_awarded"],
+            points_awarded=0,
             begin_time=leg_dict["begin_time"],
             end_time=leg_dict["end_time"],
             travel_time_seconds=leg_dict["travel_time_seconds"],
@@ -2320,41 +2413,18 @@ def get_trip_history_by_scope(
 @app.get("/api/v1/points/{user_id}", response_model=UserPointsResponse)
 def get_user_points(
         user_id: int,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> UserPointsResponse:
-    total_points = db.execute(
-        select(func.coalesce(func.sum(StudyTrip.points), 0))
-        .where(StudyTrip.user_id == user_id)
-    ).scalar_one()
+    ensure_user_access(user_id, current_user)
 
-    return UserPointsResponse(user_id=user_id, points=int(total_points))
-
-
-@app.post("/api/v1/points", response_model=UserPointsResponse)
-def add_points(
-        payload: PointCreateRequest,
-        db: Session = Depends(get_db),
-) -> UserPointsResponse:
-    user = db.get(User, payload.user_id)
-
-    if user is None:
+    if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    point_record = PointHistory(
-        user_id=payload.user_id,
-        points=payload.points,
-        date_modified=payload.date_modified or datetime.now(timezone.utc),
+    return UserPointsResponse(
+        user_id=user_id,
+        points=get_total_user_points(db, user_id),
     )
-
-    db.add(point_record)
-    db.commit()
-
-    total_points = db.execute(
-        select(func.coalesce(func.sum(PointHistory.points), 0))
-        .where(PointHistory.user_id == payload.user_id)
-    ).scalar_one()
-
-    return UserPointsResponse(user_id=payload.user_id, points=int(total_points))
 
 @app.post("/api/v1/shisa_chat", response_model=ShisaChatResponse, status_code=status.HTTP_201_CREATED)
 def create_shisa_chat_message(
@@ -2445,8 +2515,13 @@ def get_leaderboard(
         offset: int = Query(default=0, ge=0),
         sort_by: str = Query(
             default="points",
-            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage)$",
+            pattern="^(points|total_co2_saved_kg|total_trips|total_distance_km|eco_friendly_percentage|full_name|team_name)$",
         ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
+
         min_co2_saved: float | None = Query(default=None, ge=0),
         min_trips: int | None = Query(default=None, ge=0),
         min_eco_score: float | None = Query(default=None, ge=0, le=100),
@@ -2464,12 +2539,7 @@ def get_leaderboard(
             select(StudyTrip).where(StudyTrip.user_id == user.id)
         ).scalars().all()
 
-        total_points = sum(
-            trip.points
-            if trip.points is not None
-            else trip.total_points
-            for trip in study_trips
-        )
+        total_points = get_total_user_points(db, user.id)
 
         team = db.get(Team, user.team_id) if user.team_id is not None else None
         team_name = team.name if team is not None else None
@@ -2545,19 +2615,25 @@ def get_leaderboard(
             if entry.eco_friendly_percentage >= min_eco_score
         ]
 
-    if sort_by == "points":
+    if sort_by in ("full_name", "team_name"):
         leaderboard_entries.sort(
             key=lambda entry: (
-                entry.points or 0,
-                entry.total_co2_saved_kg or 0,
+                (getattr(entry, sort_by) or "").casefold(),
+                entry.user_id,
             ),
-            reverse=True,
+            reverse=(sort_order == "desc"),
         )
     else:
         leaderboard_entries.sort(
-            key=lambda entry: getattr(entry, sort_by),
-            reverse=True,
-        )
+            key=lambda entry: (
+                getattr(entry, sort_by) or 0,
+                entry.total_co2_saved_kg if sort_by == "points" else entry.points,
+                -entry.user_id,
+        ),
+        reverse=(sort_order == "desc"),
+    )
+
+
 
     total_users = len(leaderboard_entries)
 
@@ -2602,6 +2678,14 @@ def get_user_rank(
 def get_team_leaderboard(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(
+            default="points",
+            pattern="^(team_name|member_count|points|total_co2_saved_kg|total_trips|total_distance_km)$",
+        ),
+        sort_order: str = Query(
+            default="desc",
+            pattern="^(asc|desc)$",
+        ),
         db: Session = Depends(get_db),
 ) -> TeamLeaderboardResponse:
     teams = db.execute(select(Team)).scalars().all()
@@ -2616,7 +2700,7 @@ def get_team_leaderboard(
             total_co2 = team.total_co2_saved_kg
             total_trips = team.total_trips
             total_distance = team.total_distance_km
-            active_points = 0
+
         else:
             trips = db.execute(
                 select(StudyTrip).where(
@@ -2634,18 +2718,22 @@ def get_team_leaderboard(
                 for trip in trips
             )
 
-            active_points = sum(
-                trip.points
-                if trip.points is not None
-                else trip.total_points
-                for trip in trips
+
+        team_points = int(team.preserved_points) + int(
+            db.scalar(
+                select(
+                    func.coalesce(
+                        func.sum(
+                            func.coalesce(
+                                StudyTrip.points,
+                                StudyTrip.total_points,
+                            )
+                        ),
+                        0,
+                    )
+                ).where(StudyTrip.team_id == team.id)
             )
-
-        team_points = (
-                team.preserved_points
-                + int(active_points)
         )
-
         entries.append(
             TeamLeaderboardEntry(
                 team_id=team.id,
@@ -2657,15 +2745,25 @@ def get_team_leaderboard(
                 points=team_points,
             )
         )
+    if sort_by == "team_name":
+        entries.sort(
+            key=lambda team: (
+                team.team_name.casefold(),
+                team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
+    else:
+        entries.sort(
+            key=lambda team: (
+                getattr(team, sort_by),
+                team.points if sort_by != "points" else team.total_co2_saved_kg,
+                -team.team_id,
+            ),
+            reverse=(sort_order == "desc"),
+        )
 
-    entries.sort(
-        key=lambda team: (
-            team.points,
-            team.total_co2_saved_kg,
-            team.total_distance_km,
-        ),
-        reverse=True,
-    )
+
 
     return TeamLeaderboardResponse(
         entries=entries[offset: offset + limit],
@@ -2677,7 +2775,7 @@ def get_team_leaderboard(
 
 
 
-#user's team statistics
+# User's team statistics
 @app.get("/api/v1/teams/me/stats", response_model=MyTeamStatsResponse)
 def get_my_team_stats(
         current_user: User = Depends(get_current_user),
@@ -2693,9 +2791,31 @@ def get_my_team_stats(
     team = db.get(Team, current_user.team_id)
 
     if team is None:
-        raise HTTPException(status_code=404, detail="Team not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Team not found."
+        )
 
-    entries = get_team_leaderboard(limit=200, offset=0, db=db).entries
+    entries = build_team_leaderboard_entries(db)
+
+    for rank, entry in enumerate(entries, start=1):
+        if entry.team_id == current_user.team_id:
+            return MyTeamStatsResponse(
+                team_id=entry.team_id,
+                team_name=entry.team_name,
+                member_count=entry.member_count,
+                rank=rank,
+                total_teams=len(entries),
+                total_co2_saved_kg=entry.total_co2_saved_kg,
+                total_trips=entry.total_trips,
+                total_distance_km=entry.total_distance_km,
+                points=entry.points,
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail="Team not found in leaderboard."
+    )
 
     for rank, entry in enumerate(entries, start=1):
         if entry.team_id == current_user.team_id:
@@ -2912,6 +3032,7 @@ def create_team(
     # Save team + audit log in the same transaction
     db.commit()
     db.refresh(team)
+    db.refresh(current_user)
 
     return TeamResponse(
         id=team.id,
@@ -2999,3 +3120,14 @@ def get_admin_audit_logs(
         )
         for log in rows
     ]
+
+    return AdminOverviewResponse(
+        total_users=total_users,
+        total_teams=total_teams,
+        total_trips=total_trips,
+        total_co2_saved_kg=total_co2_saved_kg,
+        trips_overview=trips_overview,
+        top_transport_modes=top_transport_modes,
+        recent_support_tickets=[],
+        recent_audit_logs=[],
+    )
