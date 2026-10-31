@@ -295,6 +295,25 @@ class StudyTrip(Base):
         cascade="all, delete-orphan",
         order_by="StudyTripLeg.sequence_no",
     )
+    #revoke trips
+    is_revoked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    revoke_reason: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+
+
+
 
 
 class StudyTripLeg(Base):
@@ -690,6 +709,23 @@ class TeamLeaderboardResponse(BaseModel):
 
 
 
+#revoke trips
+
+class TripRevokeRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=255)
+
+
+class TripRevokeResponse(BaseModel):
+    trip_id: int
+    client_trip_id: str | None
+    user_id: int
+    team_id: int | None
+    revoked_points: int
+    user_points_after: int
+    team_points_after: int | None
+    message: str
+
+
 def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
     teams = db.execute(select(Team)).scalars().all()
     entries = []
@@ -701,9 +737,15 @@ def build_team_leaderboard_entries(db: Session) -> list[TeamLeaderboardEntry]:
 
         user_ids = [user.id for user in members]
 
+
         study_trips = db.execute(
-            select(StudyTrip).where(StudyTrip.team_id == team.id)
+            select(StudyTrip).where(
+                StudyTrip.team_id == team.id,
+                StudyTrip.is_revoked.is_(False),
+                )
         ).scalars().all()
+
+
 
         team_points = sum(
             trip.points if trip.points is not None else trip.total_points
@@ -923,7 +965,10 @@ def get_total_user_points(db: Session, user_id: int) -> int:
                     ),
                     0,
                 )
-            ).where(StudyTrip.user_id == user_id)
+            ).where(
+                StudyTrip.user_id == user_id,
+                StudyTrip.is_revoked.is_(False),
+                )
         )
     )
 
@@ -949,6 +994,7 @@ def delete_user_account(
         .where(
             StudyTrip.user_id == user.id,
             StudyTrip.team_id.is_not(None),
+            StudyTrip.is_revoked.is_(False),
             )
         .group_by(StudyTrip.team_id)
     ).all()
@@ -1163,10 +1209,10 @@ def serialize_legacy_trip(trip: Trip) -> TripHistoryItemResponse:
 
 
 def query_study_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
     if start is not None:
@@ -1178,10 +1224,10 @@ def query_study_trips(
 
 
 def query_legacy_trips(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[Trip]:
     stmt = select(Trip).where(Trip.user_id == user_id)
     if start is not None:
@@ -1193,10 +1239,10 @@ def query_legacy_trips(
 
 
 def get_trip_history_items(
-    db: Session,
-    user_id: int,
-    start: datetime | None = None,
-    end: datetime | None = None,
+        db: Session,
+        user_id: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
 ) -> list[TripHistoryItemResponse]:
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
@@ -1231,10 +1277,10 @@ def serialize_shisa_message(message: ShisaMessage) -> ShisaChatResponse:
 
 
 def calculate_stats(
-    db: Session,
-    user_id: int | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
+        db: Session,
+        user_id: int | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
 ) -> StatsResponse:
     start, end = parse_date_filters(from_date, to_date)
 
@@ -2002,8 +2048,10 @@ def get_admin_users(
                 0,
             ).label("total_points"),
         )
+        .where(StudyTrip.is_revoked.is_(False))
         .group_by(StudyTrip.user_id)
         .subquery()
+
     )
 
     total_stmt = select(
@@ -2012,8 +2060,8 @@ def get_admin_users(
 
     if user_filters:
         total_stmt = total_stmt.where(
-           *user_filters
-    )
+            *user_filters
+        )
 
     total = db.execute(
         total_stmt
@@ -2028,15 +2076,18 @@ def get_admin_users(
     ).scalar_one()
 
     total_points = db.execute(
-        select(func.coalesce(
-            func.sum(
-                func.coalesce(
-                    StudyTrip.points,
-                    StudyTrip.total_points,
-                )
-            ),
-            0,
-        )
+        select(
+            func.coalesce(
+                func.sum(
+                    func.coalesce(
+                        StudyTrip.points,
+                        StudyTrip.total_points,
+                    )
+                ),
+                0,
+            )
+        ).where(
+            StudyTrip.is_revoked.is_(False)
         )
     ).scalar_one()
 
@@ -2409,6 +2460,115 @@ def get_trip_history_by_scope(
     start = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc)
     return get_trip_history_items(db, user_id, start=start)
 
+@app.post(
+    "/api/v1/trips/{trip_id}/revoke",
+    response_model=TripRevokeResponse,
+)
+def revoke_trip(
+        trip_id: int,
+        payload: TripRevokeRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> TripRevokeResponse:
+
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can revoke trips.",
+        )
+
+    trip = db.execute(
+        select(StudyTrip)
+        .where(StudyTrip.id == trip_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+
+    if trip is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found.",
+        )
+
+    if trip.is_revoked:
+        raise HTTPException(
+            status_code=409,
+            detail="This trip has already been revoked.",
+        )
+
+    revoked_points = (
+        trip.points
+        if trip.points is not None
+        else trip.total_points
+    )
+
+    trip.is_revoked = True
+    trip.revoked_at = datetime.now(timezone.utc)
+    trip.revoke_reason = payload.reason
+
+    db.flush()
+
+    user_points_after = get_total_user_points(db, trip.user_id)
+
+    team_points_after = None
+
+    if trip.team_id is not None:
+        team = db.get(Team, trip.team_id)
+
+        if team is not None:
+            remaining_points = db.scalar(
+                select(
+                    func.coalesce(
+                        func.sum(
+                            func.coalesce(
+                                StudyTrip.points,
+                                StudyTrip.total_points,
+                            )
+                        ),
+                        0,
+                    )
+                ).where(
+                    StudyTrip.team_id == trip.team_id,
+                    StudyTrip.is_revoked.is_(False),
+                    )
+            )
+
+            team_points_after = (
+                    int(remaining_points or 0)
+                    + int(team.preserved_points)
+            )
+
+    create_audit_log(
+        db=db,
+        admin=current_user,
+        action="revoke_trip",
+        entity_type="study_trip",
+        entity_id=trip.id,
+        details=(
+            f"Revoked {revoked_points} points; "
+            f"user_id={trip.user_id}; "
+            f"team_id={trip.team_id}; "
+            f"reason={payload.reason}"
+        ),
+    )
+
+    response = TripRevokeResponse(
+        trip_id=trip.id,
+        client_trip_id=trip.client_trip_id,
+        user_id=trip.user_id,
+        team_id=trip.team_id,
+        revoked_points=int(revoked_points),
+        user_points_after=user_points_after,
+        team_points_after=team_points_after,
+        message="Trip revoked successfully.",
+    )
+
+    db.commit()
+
+    return response
+
+
+
+
 
 @app.get("/api/v1/points/{user_id}", response_model=UserPointsResponse)
 def get_user_points(
@@ -2629,9 +2789,9 @@ def get_leaderboard(
                 getattr(entry, sort_by) or 0,
                 entry.total_co2_saved_kg if sort_by == "points" else entry.points,
                 -entry.user_id,
-        ),
-        reverse=(sort_order == "desc"),
-    )
+            ),
+            reverse=(sort_order == "desc"),
+        )
 
 
 
@@ -2696,27 +2856,24 @@ def get_team_leaderboard(
             select(User.id).where(User.team_id == team.id)
         ).scalars().all()
 
-        if not user_ids:
-            total_co2 = team.total_co2_saved_kg
-            total_trips = team.total_trips
-            total_distance = team.total_distance_km
-
-        else:
-            trips = db.execute(
-                select(StudyTrip).where(
-                    StudyTrip.user_id.in_(user_ids)
+        trips = db.execute(
+            select(StudyTrip).where(
+                StudyTrip.team_id == team.id,
+                StudyTrip.is_revoked.is_(False),
                 )
-            ).scalars().all()
+        ).scalars().all()
 
-            total_co2 = sum(
-                trip.total_co2_saved_kg
-                for trip in trips
-            )
-            total_trips = len(trips)
-            total_distance = sum(
-                trip.total_distance_km
-                for trip in trips
-            )
+        total_co2 = sum(
+            trip.total_co2_saved_kg for trip in trips
+        )
+
+        total_trips = len(trips)
+
+        total_distance = sum(
+            trip.total_distance_km for trip in trips
+        )
+
+
 
 
         team_points = int(team.preserved_points) + int(
@@ -2731,7 +2888,10 @@ def get_team_leaderboard(
                         ),
                         0,
                     )
-                ).where(StudyTrip.team_id == team.id)
+                ).where(
+                    StudyTrip.team_id == team.id,
+                    StudyTrip.is_revoked.is_(False),
+                    )
             )
         )
         entries.append(
