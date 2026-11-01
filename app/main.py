@@ -712,7 +712,7 @@ class TeamLeaderboardResponse(BaseModel):
 #revoke trips
 
 class TripRevokeRequest(BaseModel):
-    reason: str = Field(min_length=1, max_length=255)
+    reason: str | None = Field(default=None, max_length=255)
 
 
 class TripRevokeResponse(BaseModel):
@@ -2476,16 +2476,12 @@ def get_trip_history_by_scope(
 )
 def revoke_trip(
         trip_id: int,
-        payload: TripRevokeRequest,
+        payload: TripRevokeRequest | None = None,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
 ) -> TripRevokeResponse:
 
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=403,
-            detail="Only admins can revoke trips.",
-        )
+    reason = (payload.reason.strip() if payload and payload.reason else "") or "Flagged by app"
 
     trip = db.execute(
         select(StudyTrip)
@@ -2493,7 +2489,9 @@ def revoke_trip(
         .with_for_update()
     ).scalar_one_or_none()
 
-    if trip is None:
+    # Only the account the app is logged in as may revoke its own trip.
+    # Anything else gets 404 so trip ids are not revealed.
+    if trip is None or trip.user_id != current_user.id:
         raise HTTPException(
             status_code=404,
             detail="Trip not found.",
@@ -2513,7 +2511,7 @@ def revoke_trip(
 
     trip.is_revoked = True
     trip.revoked_at = datetime.now(timezone.utc)
-    trip.revoke_reason = payload.reason
+    trip.revoke_reason = reason
 
     db.flush()
 
@@ -2557,7 +2555,7 @@ def revoke_trip(
             f"Revoked {revoked_points} points; "
             f"user_id={trip.user_id}; "
             f"team_id={trip.team_id}; "
-            f"reason={payload.reason}"
+            f"reason={reason}; revoked_by={current_user.id}"
         ),
     )
 
