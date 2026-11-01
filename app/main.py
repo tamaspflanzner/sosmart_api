@@ -1213,8 +1213,11 @@ def query_study_trips(
         user_id: int,
         start: datetime | None = None,
         end: datetime | None = None,
+        include_revoked: bool = False,
 ) -> list[StudyTrip]:
     stmt = select(StudyTrip).where(StudyTrip.user_id == user_id)
+    if not include_revoked:
+        stmt = stmt.where(StudyTrip.is_revoked.is_(False))
     if start is not None:
         stmt = stmt.where(StudyTrip.begin_time >= start)
     if end is not None:
@@ -1247,6 +1250,12 @@ def get_trip_history_items(
     study_trips = query_study_trips(db, user_id, start=start, end=end)
     if study_trips:
         return [serialize_study_trip(trip) for trip in study_trips]
+
+    # The legacy table only holds duplicate copies of study trips, so never fall
+    # back to it for a user who has study trips (e.g. all of them revoked).
+    if db.scalar(select(func.count(StudyTrip.id)).where(StudyTrip.user_id == user_id)):
+        return []
+
     return [serialize_legacy_trip(trip) for trip in query_legacy_trips(db, user_id, start=start, end=end)]
 
 
@@ -2073,6 +2082,7 @@ def get_admin_users(
 
     total_trips = db.execute(
         select(func.count(StudyTrip.id))
+        .where(StudyTrip.is_revoked.is_(False))
     ).scalar_one()
 
     total_points = db.execute(
@@ -2690,14 +2700,23 @@ def get_leaderboard(
     users = db.execute(select(User)).scalars().all()
     leaderboard_entries = []
 
+    # Legacy table stores normalized modes (e_bike -> bicycle, metro -> train, ...).
+    legacy_mode_by_value = {m.value: v for m, v in LEGACY_TRANSPORT_MODE_MAP.items()}
+
     for user in users:
-        trips = db.execute(
-            select(Trip).where(Trip.user_id == user.id)
+        # Revoked trips are excluded from every leaderboard number.
+        study_trips = db.execute(
+            select(StudyTrip).where(
+                StudyTrip.user_id == user.id,
+                StudyTrip.is_revoked.is_(False),
+                )
         ).scalars().all()
 
-        study_trips = db.execute(
-            select(StudyTrip).where(StudyTrip.user_id == user.id)
-        ).scalars().all()
+        legs = [
+            (legacy_mode_by_value.get(leg.transport_mode, leg.transport_mode), leg.distance_km)
+            for trip in study_trips
+            for leg in trip.legs
+        ]
 
         total_points = get_total_user_points(db, user.id)
 
@@ -2705,30 +2724,27 @@ def get_leaderboard(
         team_name = team.name if team is not None else None
 
 
-        total_co2 = sum(trip.co2_saved_kg for trip in trips)
-        total_trips = len(trips)
-        total_distance = sum(trip.distance_km for trip in trips)
+        total_co2 = sum(trip.total_co2_saved_kg for trip in study_trips)
+        total_trips = len(study_trips)
+        total_distance = sum(trip.total_distance_km for trip in study_trips)
 
-        walking_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "walking")
-        bicycle_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bicycle")
-        bus_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "bus")
-        train_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "train")
-        tram_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "tram")
-        scooter_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "scooter")
-        car_distance = sum(trip.distance_km for trip in trips if trip.transport_mode == "car")
+        walking_distance = sum(d for m, d in legs if m == "walking")
+        bicycle_distance = sum(d for m, d in legs if m == "bicycle")
+        bus_distance = sum(d for m, d in legs if m == "bus")
+        train_distance = sum(d for m, d in legs if m == "train")
+        tram_distance = sum(d for m, d in legs if m == "tram")
+        scooter_distance = sum(d for m, d in legs if m == "scooter")
+        car_distance = sum(d for m, d in legs if m == "car")
 
         other_distance = sum(
-            trip.distance_km
-            for trip in trips
-            if trip.transport_mode not in {
+            d for m, d in legs
+            if m not in {
                 "walking", "bicycle", "bus", "train", "tram", "scooter", "car"
             }
         )
 
         eco_friendly_modes = {"walking", "bicycle", "bus", "train", "tram", "scooter"}
-        eco_friendly_distance = sum(
-            trip.distance_km for trip in trips if trip.transport_mode in eco_friendly_modes
-        )
+        eco_friendly_distance = sum(d for m, d in legs if m in eco_friendly_modes)
 
         eco_friendly_percentage = (
             eco_friendly_distance / total_distance * 100
@@ -3291,3 +3307,5 @@ def get_admin_audit_logs(
         recent_support_tickets=[],
         recent_audit_logs=[],
     )
+
+
