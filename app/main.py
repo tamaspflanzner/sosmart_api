@@ -56,6 +56,13 @@ class ShisaRole(str, Enum):
     shisa = "shisa"
 
 
+class FeedbackCategory(str, Enum):
+    suggestion = "suggestion"
+    bug_report = "bug-report"
+    general_feedback = "general-feedback"
+    other = "other"
+
+
 CO2_EMISSION_FACTORS_KG_PER_KM: dict[TransportMode, float] = {
     TransportMode.walking: 0.0,
     TransportMode.bicycle: 0.0,
@@ -339,6 +346,43 @@ class ShisaMessage(Base):
 
     user: Mapped[User] = relationship(back_populates="shisa_messages")
 
+class FeedbackEntry(Base):
+    __tablename__ = "feedback_entries"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    category: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False
+        )
+
+    subject: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False
+        )
+
+    message: Mapped[str] = mapped_column(
+        Text,
+        nullable=False
+        )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+        )
+
 
 engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
@@ -604,6 +648,24 @@ class ShisaChatResponse(BaseModel):
     role: str
     content: str
     create_time: datetime
+
+class FeedbackCreateRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    category: FeedbackCategory
+    subject: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=5000)
+
+
+class FeedbackResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    category: FeedbackCategory
+    subject: str
+    message: str
+    created_at: datetime
 
 
 class ModeAggregation(BaseModel):
@@ -2446,6 +2508,46 @@ def create_shisa_chat_message(
     db.commit()
     db.refresh(message)
     return serialize_shisa_message(message)
+
+@app.post("/api/v1/feedback", response_model=FeedbackResponse, status_code=status.HTTP_201_CREATED)
+def create_feedback(
+        payload: FeedbackCreateRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+) -> FeedbackResponse:
+    feedback = FeedbackEntry(
+        user_id = current_user.id,
+        category = payload.category.value,
+        subject = payload.subject,
+        message = payload.message
+    )
+
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return FeedbackResponse.model_validate(feedback)
+
+@app.get("/api/v1/admin/feedback", response_model=list[FeedbackResponse])
+def get_admin_feedback(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+)-> list[FeedbackResponse]:
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can view feedback."
+        )
+    feedbacks = db.execute(
+        select(FeedbackEntry)
+        .order_by(FeedbackEntry.created_at.desc())
+    ).scalars().all()
+
+    result = []
+
+    for feedback in feedbacks:
+        result.append(FeedbackResponse.model_validate(feedback))
+
+    return result
 
 
 @app.get("/api/v1/shisa_chat/{user_id}", response_model=list[ShisaChatResponse])
